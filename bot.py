@@ -246,7 +246,7 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start(message: Message):
-    await message.answer("НОВАЯ ВЕРСИЯ 2 ✅\nВыбери действие:", reply_markup=main_kb)
+    await message.answer("ВЕРСИЯ 999 ✅", reply_markup=main_kb)
 
 
 @dp.message(F.text.in_(["➕ Пополнение", "➖ Расход", "🔄 Старт месяца"]))
