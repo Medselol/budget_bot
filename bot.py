@@ -7,7 +7,7 @@ from aiogram.filters import Command
 
 import os
 
-TOKEN = os.getenv("8617225972:AAEDYCyM6tlAWx4PjUKJ7BSxf0dTiSJ37w4")
+TOKEN = os.getenv("BOT_TOKEN")
 DB_NAME = "budget.db"
 
 BUDGETS = ["Влад", "Валера", "Общий"]
