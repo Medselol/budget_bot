@@ -83,12 +83,7 @@ income_kb = ReplyKeyboardMarkup(
 
 
 def get_nbu_usd_rate():
-    try:
-        url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json"
-        data = requests.get(url, timeout=10).json()
-        return float(data[0]["rate"])
-    except Exception:
-        return 43.0
+    return 43.5
 
 
 def init_db():
