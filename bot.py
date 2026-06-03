@@ -470,7 +470,7 @@ async def balance(message: Message):
         )
         total += values["balance"]
 
-    text += f"📌 Общий остаток: {total:.2f} $"
+    
 
     await message.answer(text)
 
