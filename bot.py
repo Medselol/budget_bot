@@ -365,7 +365,18 @@ def make_report(period):
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+USD_RATE = 43.5
 
+@dp.message(Command("setrate"))
+async def set_rate(message: Message):
+    global USD_RATE
+
+    try:
+        rate = float(message.text.split()[1])
+        USD_RATE = rate
+        await message.answer(f"✅ Новый курс USD: {USD_RATE}")
+    except:
+        await message.answer("Пример: /setrate 44.2")
 
 @dp.message(Command("start"))
 async def start(message: Message):
