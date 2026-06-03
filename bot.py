@@ -357,14 +357,7 @@ def make_report(period):
 
         text += "\n"
 
-    total_balance = total_income - total_expense
 
-    text += (
-       
-        f"➕ Доход: {total_income:.2f} $\n"
-        f"➖ Расход: {total_expense:.2f} $\n"
-        f"💰 Остаток: {total_balance:.2f} $\n"
-    )
 
     conn.close()
     return text
