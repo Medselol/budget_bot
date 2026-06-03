@@ -1,15 +1,19 @@
 import os
 import asyncio
 import sqlite3
+import requests
 from datetime import datetime, timedelta
+
+from openpyxl import Workbook, load_workbook
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
 
+
 TOKEN = os.getenv("BOT_TOKEN")
 DB_NAME = "budget.db"
-USD_RATE_DEFAULT = 43
+EXCEL_FILE = "operations.xlsx"
 
 BUDGETS = ["Влад", "Валера", "Общий"]
 
@@ -18,7 +22,16 @@ EXPENSE_CATEGORIES = [
     "⛽ Топливо", "🚕 Такси",
     "🏠 Дом", "🚗 Авто",
     "👕 Одежда", "💊 Аптека",
-    "🎮 Развлечения", "📦 Другое"
+    "🎮 Развлечения", "✈️ Путешествия",
+    "👶 Ребёнок", "📱 Связь",
+    "✍️ Другое"
+]
+
+INCOME_CATEGORIES = [
+    "💼 Зарплата", "🚗 Автомойка",
+    "💸 Возврат долга", "🎁 Подарок",
+    "💵 Продажа", "🏠 Аренда",
+    "✍️ Другое"
 ]
 
 user_state = {}
@@ -26,7 +39,7 @@ user_state = {}
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="➕ Пополнение"), KeyboardButton(text="➖ Расход")],
-        [KeyboardButton(text="🔄 Старт месяца"), KeyboardButton(text="💱 Курс USD")],
+        [KeyboardButton(text="🔄 Старт месяца"), KeyboardButton(text="💱 Курс НБУ")],
         [KeyboardButton(text="💰 Баланс")],
         [KeyboardButton(text="📅 Отчёт за день"), KeyboardButton(text="📆 Отчёт за неделю")],
         [KeyboardButton(text="📊 Отчёт за месяц")]
@@ -43,17 +56,39 @@ budget_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-category_kb = ReplyKeyboardMarkup(
+expense_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🛒 Продукты"), KeyboardButton(text="🍔 Кафе")],
         [KeyboardButton(text="⛽ Топливо"), KeyboardButton(text="🚕 Такси")],
         [KeyboardButton(text="🏠 Дом"), KeyboardButton(text="🚗 Авто")],
         [KeyboardButton(text="👕 Одежда"), KeyboardButton(text="💊 Аптека")],
-        [KeyboardButton(text="🎮 Развлечения"), KeyboardButton(text="📦 Другое")],
+        [KeyboardButton(text="🎮 Развлечения"), KeyboardButton(text="✈️ Путешествия")],
+        [KeyboardButton(text="👶 Ребёнок"), KeyboardButton(text="📱 Связь")],
+        [KeyboardButton(text="✍️ Другое")],
         [KeyboardButton(text="⬅️ Назад")]
     ],
     resize_keyboard=True
 )
+
+income_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="💼 Зарплата"), KeyboardButton(text="🚗 Автомойка")],
+        [KeyboardButton(text="💸 Возврат долга"), KeyboardButton(text="🎁 Подарок")],
+        [KeyboardButton(text="💵 Продажа"), KeyboardButton(text="🏠 Аренда")],
+        [KeyboardButton(text="✍️ Другое")],
+        [KeyboardButton(text="⬅️ Назад")]
+    ],
+    resize_keyboard=True
+)
+
+
+def get_nbu_usd_rate():
+    try:
+        url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=USD&json"
+        data = requests.get(url, timeout=10).json()
+        return float(data[0]["rate"])
+    except Exception:
+        return 43.0
 
 
 def init_db():
@@ -68,9 +103,10 @@ def init_db():
         type TEXT,
         category TEXT,
         amount REAL,
-        currency TEXT DEFAULT 'UAH',
+        currency TEXT,
         amount_uah REAL,
-        usd_rate REAL DEFAULT 43,
+        amount_usd REAL,
+        usd_rate REAL,
         comment TEXT
     )
     """)
@@ -82,90 +118,114 @@ def init_db():
     )
     """)
 
-    cur.execute("""
-    INSERT OR IGNORE INTO settings (key, value)
-    VALUES ('usd_rate', ?)
-    """, (str(USD_RATE_DEFAULT),))
+    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('chat_id', '')")
 
     conn.commit()
     conn.close()
 
 
-def get_usd_rate():
+def save_chat_id(chat_id):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key='usd_rate'")
+    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('chat_id', ?)", (str(chat_id),))
+    conn.commit()
+    conn.close()
+
+
+def get_chat_id():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key='chat_id'")
     row = cur.fetchone()
     conn.close()
-    return float(row[0]) if row else USD_RATE_DEFAULT
+    return int(row[0]) if row and row[0] else None
 
 
-def set_usd_rate(rate):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-    INSERT OR REPLACE INTO settings (key, value)
-    VALUES ('usd_rate', ?)
-    """, (str(rate),))
-    conn.commit()
-    conn.close()
+def init_excel():
+    if os.path.exists(EXCEL_FILE):
+        return
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Операции"
+    ws.append([
+        "Дата", "Бюджет", "Тип", "Категория",
+        "Сумма", "Валюта", "Сумма грн",
+        "Сумма USD", "Курс USD", "Комментарий"
+    ])
+    wb.save(EXCEL_FILE)
+
+
+def add_to_excel(date, budget, op_type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment):
+    init_excel()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb["Операции"]
+    ws.append([
+        date, budget, op_type, category,
+        amount, currency, amount_uah,
+        amount_usd, usd_rate, comment
+    ])
+    wb.save(EXCEL_FILE)
 
 
 def parse_amount(text):
-    parts = text.lower().replace(",", ".").split()
-
+    parts = text.replace(",", ".").split()
     amount = float(parts[0])
     currency = "UAH"
 
     if len(parts) > 1:
-        if parts[1] in ["usd", "$", "дол", "доллар", "долларов"]:
+        cur = parts[1].lower()
+        if cur in ["usd", "$", "дол", "доллар", "долларов"]:
             currency = "USD"
-        elif parts[1] in ["uah", "грн", "гривна", "гривен"]:
+        elif cur in ["uah", "грн", "гривна", "гривен"]:
             currency = "UAH"
 
     comment = " ".join(parts[2:]) if len(parts) > 2 else ""
 
-    rate = get_usd_rate()
-    amount_uah = amount * rate if currency == "USD" else amount
+    usd_rate = get_nbu_usd_rate()
 
-    return amount, currency, amount_uah, rate, comment
+    if currency == "USD":
+        amount_usd = amount
+        amount_uah = amount * usd_rate
+    else:
+        amount_uah = amount
+        amount_usd = amount / usd_rate
+
+    return amount, currency, amount_uah, amount_usd, usd_rate, comment
 
 
-def add_operation(budget, op_type, category, amount, currency, amount_uah, usd_rate, comment=""):
+def add_operation(budget, op_type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment):
+    date = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
     cur.execute("""
     INSERT INTO operations 
-    (date, budget, type, category, amount, currency, amount_uah, usd_rate, comment)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (date, budget, type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        datetime.now().strftime("%Y-%m-%d %H:%M"),
-        budget,
-        op_type,
-        category,
-        amount,
-        currency,
-        amount_uah,
-        usd_rate,
-        comment
+        date, budget, op_type, category,
+        amount, currency, amount_uah,
+        amount_usd, usd_rate, comment
     ))
 
     conn.commit()
     conn.close()
 
+    add_to_excel(date, budget, op_type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment)
+
 
 def get_balance():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-
     result = {}
 
     for budget in BUDGETS:
         cur.execute("""
         SELECT 
-            SUM(CASE WHEN type IN ('Пополнение', 'Старт месяца') THEN amount_uah ELSE 0 END),
-            SUM(CASE WHEN type = 'Расход' THEN amount_uah ELSE 0 END)
+            SUM(CASE WHEN type IN ('Пополнение', 'Старт месяца') THEN amount_usd ELSE 0 END),
+            SUM(CASE WHEN type = 'Расход' THEN amount_usd ELSE 0 END)
         FROM operations
         WHERE budget = ?
         """, (budget,))
@@ -173,7 +233,6 @@ def get_balance():
         income, expense = cur.fetchone()
         income = income or 0
         expense = expense or 0
-
         result[budget] = income - expense
 
     conn.close()
@@ -196,13 +255,13 @@ def make_report(period):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    text = f"📊 Отчёт {title}\n\n"
+    text = f"📊 Отчёт {title}\n💱 Курс НБУ USD: {get_nbu_usd_rate():.2f} грн\n\n"
 
     for budget in BUDGETS:
         cur.execute("""
         SELECT 
-            SUM(CASE WHEN type IN ('Пополнение', 'Старт месяца') THEN amount_uah ELSE 0 END),
-            SUM(CASE WHEN type = 'Расход' THEN amount_uah ELSE 0 END)
+            SUM(CASE WHEN type IN ('Пополнение', 'Старт месяца') THEN amount_usd ELSE 0 END),
+            SUM(CASE WHEN type = 'Расход' THEN amount_usd ELSE 0 END)
         FROM operations
         WHERE budget = ? AND date >= ?
         """, (budget, date_from))
@@ -214,25 +273,25 @@ def make_report(period):
 
         text += (
             f"🔹 {budget}\n"
-            f"➕ Пополнения: {income:.2f} грн\n"
-            f"➖ Расходы: {expense:.2f} грн\n"
-            f"💰 Остаток: {balance:.2f} грн\n"
+            f"➕ Доход: {income:.2f} $\n"
+            f"➖ Расход: {expense:.2f} $\n"
+            f"💰 Остаток: {balance:.2f} $\n"
         )
 
         cur.execute("""
-        SELECT category, SUM(amount_uah)
+        SELECT category, SUM(amount_usd)
         FROM operations
         WHERE budget = ? AND type = 'Расход' AND date >= ?
         GROUP BY category
-        ORDER BY SUM(amount_uah) DESC
+        ORDER BY SUM(amount_usd) DESC
+        LIMIT 5
         """, (budget, date_from))
 
-        categories = cur.fetchall()
-
-        if categories:
-            text += "Категории:\n"
-            for category, total in categories:
-                text += f"• {category}: {total:.2f} грн\n"
+        cats = cur.fetchall()
+        if cats:
+            text += "🏆 Топ расходов:\n"
+            for category, total in cats:
+                text += f"• {category}: {total:.2f} $\n"
 
         text += "\n"
 
@@ -246,80 +305,69 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start(message: Message):
-    await message.answer("ВЕРСИЯ 999 ✅", reply_markup=main_kb)
+    save_chat_id(message.chat.id)
+    await message.answer("Привет 👋\nНовая версия с USD, НБУ и Excel ✅", reply_markup=main_kb)
 
 
 @dp.message(F.text.in_(["➕ Пополнение", "➖ Расход", "🔄 Старт месяца"]))
 async def choose_action(message: Message):
-    user_id = message.from_user.id
     action = message.text.replace("➕ ", "").replace("➖ ", "").replace("🔄 ", "")
-
-    user_state[user_id] = {
-        "action": action,
-        "budget": None,
-        "category": None
-    }
-
+    user_state[message.from_user.id] = {"action": action, "budget": None, "category": None}
     await message.answer("Теперь выбери, для кого:", reply_markup=budget_kb)
 
 
 @dp.message(F.text.in_(["👤 Влад", "👤 Валера", "👥 Общий"]))
 async def choose_budget(message: Message):
-    user_id = message.from_user.id
+    state = user_state.get(message.from_user.id)
 
-    if user_id not in user_state:
+    if not state:
         await message.answer("Сначала выбери действие.", reply_markup=main_kb)
         return
 
     budget = message.text.replace("👤 ", "").replace("👥 ", "")
-    user_state[user_id]["budget"] = budget
+    state["budget"] = budget
 
-    action = user_state[user_id]["action"]
-
-    if action == "Расход":
-        await message.answer("Выбери категорию расхода:", reply_markup=category_kb)
+    if state["action"] == "Расход":
+        await message.answer("Выбери категорию расхода:", reply_markup=expense_kb)
+    elif state["action"] == "Пополнение":
+        await message.answer("Выбери источник дохода:", reply_markup=income_kb)
     else:
-        await message.answer(
-            f"Введи сумму для {budget}.\n\n"
-            f"Примеры:\n"
-            f"1000 грн\n"
-            f"100 usd\n"
-            f"100 $"
-        )
+        state["category"] = "Старт месяца"
+        await message.answer("Введи стартовую сумму.\nНапример: 1000 грн или 100 usd")
 
 
-@dp.message(F.text.in_(EXPENSE_CATEGORIES))
+@dp.message(F.text.in_(EXPENSE_CATEGORIES + INCOME_CATEGORIES))
 async def choose_category(message: Message):
-    user_id = message.from_user.id
+    state = user_state.get(message.from_user.id)
 
-    if user_id not in user_state:
-        await message.answer("Сначала выбери расход.", reply_markup=main_kb)
+    if not state:
+        await message.answer("Сначала выбери действие.", reply_markup=main_kb)
         return
 
-    user_state[user_id]["category"] = message.text
+    if message.text == "✍️ Другое":
+        state["waiting_custom_category"] = True
+        if state["action"] == "Расход":
+            await message.answer("Напиши, на что потрачено:")
+        else:
+            await message.answer("Напиши, откуда пришли деньги:")
+        return
 
-    await message.answer(
-        "Введи сумму расхода.\n\n"
-        "Примеры:\n"
-        "1200 грн\n"
-        "50 usd\n"
-        "50 $"
-    )
+    state["category"] = message.text
+    await message.answer("Введи сумму.\nНапример: 1000 грн или 100 usd")
 
 
-@dp.message(F.text == "💱 Курс USD")
-async def usd_rate(message: Message):
-    user_state[message.from_user.id] = {"action": "Курс USD"}
-    await message.answer(f"Текущий курс: {get_usd_rate()} грн\nВведи новый курс, например: 43")
+@dp.message(F.text == "💱 Курс НБУ")
+async def show_rate(message: Message):
+    await message.answer(f"💱 Курс НБУ USD: {get_nbu_usd_rate():.2f} грн")
 
 
 @dp.message(F.text == "💰 Баланс")
 async def balance(message: Message):
     data = get_balance()
-    text = "💰 Баланс:\n\n"
+    text = "💰 Баланс в долларах:\n\n"
 
     for budget, value in data.items():
-        text += f"🔹 {budget}: {value:.2f} грн\n"
+        text += f"🔹 {budget}: {value:.2f} $\n"
 
     await message.answer(text)
 
@@ -345,56 +393,38 @@ async def back(message: Message):
 
 
 @dp.message()
-async def handle_amount(message: Message):
-    user_id = message.from_user.id
+async def handle_text(message: Message):
+    state = user_state.get(message.from_user.id)
 
-    if user_id not in user_state:
+    if not state:
         await message.answer("Сначала выбери действие.", reply_markup=main_kb)
         return
 
-    action = user_state[user_id].get("action")
-
-    if action == "Курс USD":
-        try:
-            rate = float(message.text.replace(",", "."))
-            set_usd_rate(rate)
-            await message.answer(f"✅ Курс USD установлен: {rate} грн", reply_markup=main_kb)
-        except ValueError:
-            await message.answer("Введи курс числом. Например: 43")
+    if state.get("waiting_custom_category"):
+        state["category"] = message.text
+        state["waiting_custom_category"] = False
+        await message.answer("Теперь введи сумму.\nНапример: 1000 грн или 100 usd")
         return
 
-    budget = user_state[user_id].get("budget")
-    category = user_state[user_id].get("category")
+    budget = state.get("budget")
+    action = state.get("action")
+    category = state.get("category")
 
     if not budget:
         await message.answer("Сначала выбери Влад / Валера / Общий.", reply_markup=budget_kb)
         return
 
-    if action == "Расход" and not category:
-        await message.answer("Сначала выбери категорию расхода.", reply_markup=category_kb)
+    if not category:
+        await message.answer("Сначала выбери категорию.", reply_markup=main_kb)
         return
 
     try:
-        amount, currency, amount_uah, rate, comment = parse_amount(message.text)
+        amount, currency, amount_uah, amount_usd, rate, comment = parse_amount(message.text)
     except Exception:
-        await message.answer("Введи сумму правильно. Например: 1200 грн или 50 usd")
+        await message.answer("Введи сумму правильно. Например: 1000 грн или 100 usd")
         return
 
-    if action == "Пополнение":
-        category = "Пополнение"
-    elif action == "Старт месяца":
-        category = "Старт месяца"
-
-    add_operation(
-        budget=budget,
-        op_type=action,
-        category=category,
-        amount=amount,
-        currency=currency,
-        amount_uah=amount_uah,
-        usd_rate=rate,
-        comment=comment
-    )
+    add_operation(budget, action, category, amount, currency, amount_uah, amount_usd, rate, comment)
 
     await message.answer(
         f"✅ Записано\n\n"
@@ -403,15 +433,33 @@ async def handle_amount(message: Message):
         f"Категория: {category}\n"
         f"Сумма: {amount:.2f} {currency}\n"
         f"В гривне: {amount_uah:.2f} грн\n"
-        f"Курс USD: {rate}",
+        f"В долларах: {amount_usd:.2f} $\n"
+        f"Курс НБУ: {rate:.2f}",
         reply_markup=main_kb
     )
 
-    user_state[user_id] = {}
+    user_state[message.from_user.id] = {}
+
+
+async def auto_reports():
+    while True:
+        now = datetime.now()
+        chat_id = get_chat_id()
+
+        if chat_id:
+            if now.weekday() == 6 and now.hour == 21 and now.minute == 0:
+                await bot.send_message(chat_id, "🤖 Автоотчёт за неделю\n\n" + make_report("week"))
+
+            if now.day == 1 and now.hour == 9 and now.minute == 0:
+                await bot.send_message(chat_id, "🤖 Автоотчёт за месяц\n\n" + make_report("month"))
+
+        await asyncio.sleep(60)
 
 
 async def main():
     init_db()
+    init_excel()
+    asyncio.create_task(auto_reports())
     await dp.start_polling(bot)
 
 
