@@ -360,7 +360,7 @@ def make_report(period):
     total_balance = total_income - total_expense
 
     text += (
-        f"📌 Итого по всем:\n"
+       
         f"➕ Доход: {total_income:.2f} $\n"
         f"➖ Расход: {total_expense:.2f} $\n"
         f"💰 Остаток: {total_balance:.2f} $\n"
