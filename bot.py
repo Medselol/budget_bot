@@ -1,610 +1,690 @@
+#!/usr/bin/env python3
+"""Private construction cash ledger over Telegram Bot API. Python 3.10+, stdlib only."""
+import csv
+import io
+import json
+import logging
 import os
-import asyncio
+import re
 import sqlite3
-from datetime import datetime, timedelta
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from openpyxl import Workbook, load_workbook
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
-
-
-TOKEN = os.getenv("BOT_TOKEN")
-
-DB_NAME = "budget.db"
-EXCEL_FILE = "operations.xlsx"
-
-USD_RATE = 43.5
-
-BUDGETS = ["Влад", "Валера", "Общий"]
-
-EXPENSE_CATEGORIES = [
-    "🛒 Продукты",
-    "🍔 Кафе",
-    "⛽ Топливо",
-    "🚕 Такси",
-    "🏠 Дом",
-    "🚗 Авто",
-    "👕 Одежда",
-    "💊 Аптека",
-    "🎮 Развлечения",
-    "✈️ Путешествия",
-    "👶 Ребёнок",
-    "📱 Связь",
-    "✍️ Другое",
-]
-
-INCOME_CATEGORIES = [
-    "💼 Зарплата",
-    "🚗 Автомойка",
-    "💸 Возврат долга",
-    "🎁 Подарок",
-    "💵 Продажа",
-    "🏠 Аренда",
-    "✍️ Другое",
-]
-
-user_state = {}
-
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Пополнение"), KeyboardButton(text="➖ Расход")],
-        [KeyboardButton(text="🔄 Старт месяца"), KeyboardButton(text="💱 Курс USD")],
-        [KeyboardButton(text="💰 Баланс")],
-        [KeyboardButton(text="📅 Отчёт за день"), KeyboardButton(text="📆 Отчёт за неделю")],
-        [KeyboardButton(text="📊 Отчёт за месяц")],
-    ],
-    resize_keyboard=True,
-)
-
-budget_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="👤 Влад"), KeyboardButton(text="👤 Валера")],
-        [KeyboardButton(text="👥 Общий")],
-        [KeyboardButton(text="⬅️ Назад")],
-    ],
-    resize_keyboard=True,
-)
-
-expense_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🛒 Продукты"), KeyboardButton(text="🍔 Кафе")],
-        [KeyboardButton(text="⛽ Топливо"), KeyboardButton(text="🚕 Такси")],
-        [KeyboardButton(text="🏠 Дом"), KeyboardButton(text="🚗 Авто")],
-        [KeyboardButton(text="👕 Одежда"), KeyboardButton(text="💊 Аптека")],
-        [KeyboardButton(text="🎮 Развлечения"), KeyboardButton(text="✈️ Путешествия")],
-        [KeyboardButton(text="👶 Ребёнок"), KeyboardButton(text="📱 Связь")],
-        [KeyboardButton(text="✍️ Другое")],
-        [KeyboardButton(text="⬅️ Назад")],
-    ],
-    resize_keyboard=True,
-)
-
-income_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="💼 Зарплата"), KeyboardButton(text="🚗 Автомойка")],
-        [KeyboardButton(text="💸 Возврат долга"), KeyboardButton(text="🎁 Подарок")],
-        [KeyboardButton(text="💵 Продажа"), KeyboardButton(text="🏠 Аренда")],
-        [KeyboardButton(text="✍️ Другое")],
-        [KeyboardButton(text="⬅️ Назад")],
-    ],
-    resize_keyboard=True,
-)
+TZ = ZoneInfo("Europe/Kyiv")
+STAGES = ["Земля и оформление", "Проектирование", "Фундамент", "Стены", "Перекрытия", "Кровля", "Окна и двери", "Фасад", "Электрика", "Сантехника", "Отопление", "Вентиляция", "Внутренние работы", "Коммуникации", "Благоустройство", "Прочее"]
+COST_TYPES = ["Материалы", "Работа", "Техника", "Доставка", "Услуги", "Прочее"]
+SOURCES = ["Личные средства", "Инвестор", "Кредит", "Аванс покупателя", "Оплата покупателя", "Возврат поставщика", "Прочее"]
+SALES = {"Аванс покупателя", "Оплата покупателя"}
+CURRENCIES = ("UAH", "USD")
 
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+def money(kop, currency="UAH"):
+    value = f"{Decimal(kop) / 100:,.2f}".replace(",", " ")
+    return value + (" грн" if currency == "UAH" else " USD")
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS operations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT,
-        budget TEXT,
-        type TEXT,
-        category TEXT,
-        amount REAL,
-        currency TEXT,
-        amount_uah REAL,
-        amount_usd REAL,
-        usd_rate REAL,
-        comment TEXT
-    )
+
+def parse_amount(value):
+    value = value.replace("\u00a0", "").replace(" ", "").replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d{1,2})?", value):
+        raise ValueError("Напиши сумму числом, например 12500 или 12500,50.")
+    try:
+        amount = int((Decimal(value) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, OverflowError):
+        raise ValueError("Некорректная сумма.") from None
+    if amount <= 0 or amount > 100_000_000_000:
+        raise ValueError("Сумма должна быть больше нуля и не выше 1 млрд единиц валюты.")
+    return amount
+
+
+def valid_date(value):
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise ValueError("Дата нужна в формате ГГГГ-ММ-ДД, например 2026-09-23.") from None
+
+
+def connect(path, owner_id=0, initial_users=()):
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(owner_id,name));
+        CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(owner_id,name));
+        CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS drafts (user_id INTEGER PRIMARY KEY, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS operations (
+            id INTEGER PRIMARY KEY,
+            update_id INTEGER UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            occurred_on TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('income','expense','transfer')),
+            project_id INTEGER REFERENCES projects(id),
+            category TEXT, cost_type TEXT, source TEXT,
+            account_id INTEGER REFERENCES accounts(id),
+            from_account_id INTEGER REFERENCES accounts(id),
+            to_account_id INTEGER REFERENCES accounts(id),
+            amount_kop INTEGER NOT NULL CHECK(amount_kop > 0),
+            currency TEXT NOT NULL DEFAULT 'UAH' CHECK(currency IN ('UAH','USD')),
+            comment TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS operations_date ON operations(occurred_on, project_id);
     """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )
-    """)
-
-    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('chat_id', '')")
-
-    conn.commit()
-    conn.close()
-
-
-def save_chat_id(chat_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('chat_id', ?)",
-        (str(chat_id),)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_chat_id():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key='chat_id'")
-    row = cur.fetchone()
-    conn.close()
-
-    if row and row[0]:
-        return int(row[0])
-
-    return None
+    # Rebuild old globally unique names so each user can have their own accounts/projects.
+    db.commit()
+    for table in ("projects", "accounts"):
+        columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+        if "owner_id" not in columns:
+            db.execute("PRAGMA foreign_keys=OFF")
+            with db:
+                db.execute(f"CREATE TABLE {table}_new (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(owner_id,name))")
+                db.execute(f"INSERT INTO {table}_new(id,owner_id,name) SELECT id,?,name FROM {table}", (owner_id,))
+                db.execute(f"DROP TABLE {table}")
+                db.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+            db.execute("PRAGMA foreign_keys=ON")
+    # Older databases contained hryvnia-only, owner-only transactions.
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(operations)")}
+    if "currency" not in columns:
+        db.execute("ALTER TABLE operations ADD COLUMN currency TEXT NOT NULL DEFAULT 'UAH' CHECK(currency IN ('UAH','USD'))")
+    if "user_id" not in columns:
+        db.execute("ALTER TABLE operations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+        db.execute("UPDATE operations SET user_id=?", (owner_id,))
+    if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        for uid in (owner_id, *initial_users):
+            db.execute("INSERT OR IGNORE INTO users(id,name) VALUES (?,?)", (uid, "Владелец" if uid == owner_id else f"Участник {uid}"))
+    for name in ("Наличные", "Карта", "Счёт"):
+        for row in db.execute("SELECT id FROM users"):
+            db.execute("INSERT OR IGNORE INTO accounts(owner_id,name) VALUES (?,?)", (row[0], name))
+    db.commit()
+    db.execute("PRAGMA foreign_keys=ON")
+    if db.execute("PRAGMA foreign_key_check").fetchone():
+        raise RuntimeError("Нарушены связи в базе после обновления")
+    return db
 
 
-def init_excel():
-    if os.path.exists(EXCEL_FILE):
-        return
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Операции"
-
-    ws.append([
-        "Дата",
-        "Бюджет",
-        "Тип",
-        "Категория",
-        "Сумма",
-        "Валюта",
-        "Сумма грн",
-        "Сумма USD",
-        "Курс USD",
-        "Комментарий",
-    ])
-
-    wb.save(EXCEL_FILE)
+def names(db, table, user_id=0):
+    assert table in ("projects", "accounts")
+    return db.execute(f"SELECT id,name FROM {table} WHERE owner_id=? ORDER BY id", (user_id,)).fetchall()
 
 
-def add_to_excel(date, budget, op_type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment):
-    init_excel()
-
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb["Операции"]
-
-    ws.append([
-        date,
-        budget,
-        op_type,
-        category,
-        amount,
-        currency,
-        amount_uah,
-        amount_usd,
-        usd_rate,
-        comment,
-    ])
-
-    wb.save(EXCEL_FILE)
+def draft(db, user_id):
+    row = db.execute("SELECT data FROM drafts WHERE user_id=?", (user_id,)).fetchone()
+    return json.loads(row[0]) if row else None
 
 
-def parse_amount(text):
-    parts = text.replace(",", ".").split()
-
-    amount = float(parts[0])
-    currency = "UAH"
-
-    if len(parts) > 1:
-        cur = parts[1].lower()
-
-        if cur in ["usd", "$", "дол", "доллар", "долларов"]:
-            currency = "USD"
-        elif cur in ["uah", "грн", "гривна", "гривен"]:
-            currency = "UAH"
-
-    comment = " ".join(parts[2:]) if len(parts) > 2 else ""
-
-    if currency == "USD":
-        amount_usd = amount
-        amount_uah = amount * USD_RATE
-    else:
-        amount_uah = amount
-        amount_usd = amount / USD_RATE
-
-    return amount, currency, amount_uah, amount_usd, USD_RATE, comment
+def set_draft(db, user_id, data):
+    db.execute("INSERT INTO drafts(user_id,data) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data", (user_id, json.dumps(data, ensure_ascii=False)))
+    db.commit()
 
 
-def add_operation(budget, op_type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment):
-    date = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-
-    cur.execute("""
-    INSERT INTO operations 
-    (date, budget, type, category, amount, currency, amount_uah, amount_usd, usd_rate, comment)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        date,
-        budget,
-        op_type,
-        category,
-        amount,
-        currency,
-        amount_uah,
-        amount_usd,
-        usd_rate,
-        comment,
-    ))
-
-    conn.commit()
-    conn.close()
-
-    add_to_excel(
-        date,
-        budget,
-        op_type,
-        category,
-        amount,
-        currency,
-        amount_uah,
-        amount_usd,
-        usd_rate,
-        comment,
-    )
+def clear_draft(db, user_id):
+    db.execute("DELETE FROM drafts WHERE user_id=?", (user_id,))
+    db.commit()
 
 
-def get_balance():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+def record(db, data, update_id, user_id=0):
+    currency = data.get("currency", "UAH")
+    if currency not in CURRENCIES:
+        raise ValueError("Неизвестная валюта")
+    for key, table in (("project_id", "projects"), ("account_id", "accounts"), ("from_account_id", "accounts"), ("to_account_id", "accounts")):
+        if data.get(key) and not db.execute(f"SELECT 1 FROM {table} WHERE id=? AND owner_id=?", (data[key], user_id)).fetchone():
+            raise ValueError("Объект или счёт не принадлежит пользователю")
+    keys = ("user_id", "occurred_on", "kind", "project_id", "category", "cost_type", "source", "account_id", "from_account_id", "to_account_id", "amount_kop", "currency", "comment")
+    vals = [currency if key == "currency" else user_id if key == "user_id" else data.get("comment", "") if key == "comment" else data.get(key) for key in keys]
+    with db:
+        cursor = db.execute("INSERT OR IGNORE INTO operations(update_id," + ",".join(keys) + ") VALUES (" + ",".join("?" for _ in range(len(keys) + 1)) + ")", [update_id] + vals)
+        row = db.execute("SELECT id FROM operations WHERE update_id=?", (update_id,)).fetchone()
+        if row is None:
+            raise ValueError("Операция не сохранена. Проверь сумму и счета.")
+        if cursor.rowcount:
+            bump_revision(db)
+    return row[0]
 
-    result = {}
 
-    for budget in BUDGETS:
-        cur.execute("""
-        SELECT 
-            SUM(CASE WHEN type IN ('Пополнение', 'Старт месяца') THEN amount_usd ELSE 0 END),
-            SUM(CASE WHEN type = 'Расход' THEN amount_usd ELSE 0 END)
-        FROM operations
-        WHERE budget = ?
-        """, (budget,))
+def bump_revision(db):
+    db.execute("INSERT INTO settings(key,value) VALUES ('ledger_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
 
-        income, expense = cur.fetchone()
 
-        income = income or 0
-        expense = expense or 0
+def update_operation(db, data, operation_id, user_id):
+    if data.get("currency", "UAH") not in CURRENCIES:
+        raise ValueError("Неизвестная валюта")
+    if data.get("kind") not in ("income", "expense", "transfer"):
+        raise ValueError("Неизвестный тип операции")
+    if not isinstance(data.get("amount_kop"), int) or data["amount_kop"] <= 0:
+        raise ValueError("Некорректная сумма")
+    for key, table in (("project_id", "projects"), ("account_id", "accounts"), ("from_account_id", "accounts"), ("to_account_id", "accounts")):
+        if data.get(key) and not db.execute(f"SELECT 1 FROM {table} WHERE id=? AND owner_id=?", (data[key], user_id)).fetchone():
+            raise ValueError("Объект или счёт не принадлежит пользователю")
+    with db:
+        cursor = db.execute("""UPDATE operations SET occurred_on=?,kind=?,project_id=?,category=?,cost_type=?,source=?,
+            account_id=?,from_account_id=?,to_account_id=?,amount_kop=?,currency=?,comment=? WHERE id=? AND user_id=?""",
+            (data["occurred_on"], data["kind"], data.get("project_id"), data.get("category"), data.get("cost_type"),
+             data.get("source"), data.get("account_id"), data.get("from_account_id"), data.get("to_account_id"),
+             data["amount_kop"], data.get("currency", "UAH"), data.get("comment", ""), operation_id, user_id))
+        if not cursor.rowcount:
+            raise ValueError("Операция не найдена или принадлежит другому пользователю")
+        bump_revision(db)
 
-        result[budget] = {
-            "income": income,
-            "expense": expense,
-            "balance": income - expense,
-        }
 
-    conn.close()
+def operation_row(db, operation_id, user_id):
+    return next((row for row in rows_for(db, user_id=user_id) if row["id"] == operation_id), None)
+
+
+def operation_text(db, row):
+    data = {key: row[key] for key in ("kind", "occurred_on", "project_id", "category", "cost_type", "source", "account_id", "from_account_id", "to_account_id", "amount_kop", "currency", "comment")}
+    return f"Операция №{row['id']}\n" + description(db, data, row["user_id"])
+
+
+def rows_for(db, start=None, end=None, project_id=None, user_id=None):
+    sql = """SELECT o.*,p.name AS project,a.name AS account,af.name AS from_account,at.name AS to_account,u.name AS user_name
+        FROM operations o LEFT JOIN projects p ON p.id=o.project_id
+        LEFT JOIN accounts a ON a.id=o.account_id
+        LEFT JOIN accounts af ON af.id=o.from_account_id
+        LEFT JOIN accounts at ON at.id=o.to_account_id
+        LEFT JOIN users u ON u.id=o.user_id WHERE 1=1"""
+    args = []
+    if user_id is not None:
+        sql += " AND o.user_id=?"; args.append(user_id)
+    if start:
+        sql += " AND o.occurred_on>=?"; args.append(start)
+    if end:
+        sql += " AND o.occurred_on<=?"; args.append(end)
+    if project_id is not None:
+        sql += " AND o.project_id=?"; args.append(project_id)
+    return db.execute(sql + " ORDER BY o.occurred_on,o.id", args).fetchall()
+
+
+def summary(rows):
+    result = {code: {"financing": 0, "sales": 0, "refunds": 0, "expense": 0, "by_stage": {}, "by_source": {}, "by_type": {}} for code in CURRENCIES}
+    for row in rows:
+        currency = row["currency"]
+        if currency not in result:
+            raise ValueError("Неизвестная валюта в базе")
+        part = result[currency]
+        if row["kind"] == "income":
+            source = row["source"] or "Прочее"
+            group = "sales" if source in SALES else "refunds" if source == "Возврат поставщика" else "financing"
+            part[group] += row["amount_kop"]
+            part["by_source"][source] = part["by_source"].get(source, 0) + row["amount_kop"]
+        elif row["kind"] == "expense":
+            part["expense"] += row["amount_kop"]
+            for key, field in (("by_stage", "category"), ("by_type", "cost_type")):
+                label = row[field] or "Прочее"
+                part[key][label] = part[key].get(label, 0) + row["amount_kop"]
+    for part in result.values():
+        part["cash_net"] = part["financing"] + part["sales"] + part["refunds"] - part["expense"]
     return result
 
 
-def make_report(period):
-    now = datetime.now()
-
-    if period == "day":
-        title = "за день"
-        date_from = now.strftime("%Y-%m-%d 00:00")
-    elif period == "week":
-        title = "за неделю"
-        date_from = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
-    else:
-        title = "за месяц"
-        date_from = now.strftime("%Y-%m-01 00:00")
-
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-
-    text = f"📊 Отчёт {title}\n"
-    text += f"💱 Курс USD: {USD_RATE} грн\n\n"
-
-    total_income = 0
-    total_expense = 0
-
-    for budget in BUDGETS:
-        cur.execute("""
-        SELECT 
-            SUM(CASE WHEN type IN ('Пополнение', 'Старт месяца') THEN amount_usd ELSE 0 END),
-            SUM(CASE WHEN type = 'Расход' THEN amount_usd ELSE 0 END)
-        FROM operations
-        WHERE budget = ? AND date >= ?
-        """, (budget, date_from))
-
-        income, expense = cur.fetchone()
-
-        income = income or 0
-        expense = expense or 0
-        balance = income - expense
-
-        total_income += income
-        total_expense += expense
-
-        text += (
-            f"🔹 {budget}\n"
-            f"➕ Доход: {income:.2f} $\n"
-            f"➖ Расход: {expense:.2f} $\n"
-            f"💰 Остаток: {balance:.2f} $\n"
-        )
-
-        cur.execute("""
-        SELECT category, SUM(amount_usd)
-        FROM operations
-        WHERE budget = ? AND type = 'Расход' AND date >= ?
-        GROUP BY category
-        ORDER BY SUM(amount_usd) DESC
-        LIMIT 5
-        """, (budget, date_from))
-
-        categories = cur.fetchall()
-
-        if categories:
-            text += "🏆 Топ расходов:\n"
-            for category, total in categories:
-                text += f"• {category}: {total:.2f} $\n"
-
-        text += "\n"
-
-
-
-    conn.close()
-    return text
-
-
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-USD_RATE = 43.5
-
-@dp.message(Command("setrate"))
-async def set_rate(message: Message):
-    global USD_RATE
-
-    try:
-        rate = float(message.text.split()[1])
-        USD_RATE = rate
-        await message.answer(f"✅ Новый курс USD: {USD_RATE}")
-    except:
-        await message.answer("Пример: /setrate 44.2")
-
-@dp.message(Command("start"))
-async def start(message: Message):
-    save_chat_id(message.chat.id)
-    await message.answer(
-        "Привет 👋\n"
-        "Бот учёта расходов готов ✅\n\n"
-        f"Курс USD: {USD_RATE} грн\n"
-        "Все балансы показываются в долларах.",
-        reply_markup=main_kb,
-    )
-
-
-@dp.message(F.text.in_(["➕ Пополнение", "➖ Расход", "🔄 Старт месяца"]))
-async def choose_action(message: Message):
-    action = message.text.replace("➕ ", "").replace("➖ ", "").replace("🔄 ", "")
-
-    user_state[message.from_user.id] = {
-        "action": action,
-        "budget": None,
-        "category": None,
-        "waiting_custom_category": False,
-    }
-
-    await message.answer("Теперь выбери, для кого:", reply_markup=budget_kb)
-
-
-@dp.message(F.text.in_(["👤 Влад", "👤 Валера", "👥 Общий"]))
-async def choose_budget(message: Message):
-    state = user_state.get(message.from_user.id)
-
-    if not state:
-        await message.answer("Сначала выбери действие.", reply_markup=main_kb)
-        return
-
-    budget = message.text.replace("👤 ", "").replace("👥 ", "")
-    state["budget"] = budget
-
-    if state["action"] == "Расход":
-        await message.answer("Выбери категорию расхода:", reply_markup=expense_kb)
-    elif state["action"] == "Пополнение":
-        await message.answer("Выбери источник дохода:", reply_markup=income_kb)
-    else:
-        state["category"] = "Старт месяца"
-        await message.answer(
-            "Введи стартовую сумму.\n\n"
-            "Примеры:\n"
-            "1000 грн\n"
-            "100 usd\n"
-            "100 $"
-        )
-
-
-@dp.message(F.text.in_(EXPENSE_CATEGORIES + INCOME_CATEGORIES))
-async def choose_category(message: Message):
-    state = user_state.get(message.from_user.id)
-
-    if not state:
-        await message.answer("Сначала выбери действие.", reply_markup=main_kb)
-        return
-
-    if message.text == "✍️ Другое":
-        state["waiting_custom_category"] = True
-
-        if state["action"] == "Расход":
-            await message.answer("Напиши, на что потрачено:")
+def balances(db, user_id=0):
+    result = {row["id"]: [row["name"], {code: 0 for code in CURRENCIES}] for row in names(db, "accounts", user_id)}
+    for row in rows_for(db, user_id=user_id):
+        amount = row["amount_kop"]
+        currency = row["currency"]
+        if row["kind"] == "transfer":
+            result[row["from_account_id"]][1][currency] -= amount
+            result[row["to_account_id"]][1][currency] += amount
+        elif row["kind"] == "income":
+            result[row["account_id"]][1][currency] += amount
         else:
-            await message.answer("Напиши, откуда пришли деньги:")
-
-        return
-
-    state["category"] = message.text
-
-    await message.answer(
-        "Введи сумму.\n\n"
-        "Примеры:\n"
-        "1000 грн\n"
-        "100 usd\n"
-        "100 $"
-    )
+            result[row["account_id"]][1][currency] -= amount
+    return result
 
 
-@dp.message(F.text == "💱 Курс USD")
-async def show_rate(message: Message):
-    await message.answer(f"💱 Курс USD сейчас: {USD_RATE} грн")
+def safe_cell(value):
+    text = str(value or "")
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")) else text
 
 
-@dp.message(F.text == "💰 Баланс")
-async def balance(message: Message):
-    data = get_balance()
-
-    text = "💰 Баланс в долларах:\n\n"
-
-    total = 0
-
-    for budget, values in data.items():
-        text += (
-            f"🔹 {budget}\n"
-            f"➕ Доход: {values['income']:.2f} $\n"
-            f"➖ Расход: {values['expense']:.2f} $\n"
-            f"💰 Остаток: {values['balance']:.2f} $\n\n"
-        )
-        total += values["balance"]
-
-    
-
-    await message.answer(text)
+def csv_report(rows, start, end, project):
+    totals = summary(rows)
+    stream = io.StringIO()
+    writer = csv.writer(stream, delimiter=";")
+    writer.writerow(["Отчёт по стройке", project, f"{start or 'начало'} — {end or 'сегодня'}"])
+    for currency in CURRENCIES:
+        for label, key in (("Вложения и займы", "financing"), ("Поступления от покупателей", "sales"), ("Возвраты", "refunds"), ("Расходы", "expense"), ("Чистое изменение денег", "cash_net")):
+            writer.writerow([label, f"{Decimal(totals[currency][key]) / 100:.2f}", currency])
+    writer.writerow([])
+    writer.writerow(["ID", "Пользователь ID", "Пользователь", "Дата", "Операция", "Объект", "Этап", "Тип затрат", "Источник прихода", "Счёт", "Счёт отправителя", "Счёт получателя", "Сумма", "Валюта", "Комментарий"])
+    for row in rows:
+        writer.writerow([row["id"], row["user_id"], safe_cell(row["user_name"]), row["occurred_on"], row["kind"], safe_cell(row["project"]), safe_cell(row["category"]), safe_cell(row["cost_type"]), safe_cell(row["source"]), safe_cell(row["account"]), safe_cell(row["from_account"]), safe_cell(row["to_account"]), f"{Decimal(row['amount_kop']) / 100:.2f}", row["currency"], safe_cell(row["comment"])])
+    return ("\ufeff" + stream.getvalue()).encode("utf-8")
 
 
-@dp.message(F.text == "📅 Отчёт за день")
-async def report_day(message: Message):
-    await message.answer(make_report("day"))
+def keyboard(options, width=2):
+    buttons = [{"text": label, "callback_data": callback} for label, callback in options]
+    return {"inline_keyboard": [buttons[i:i + width] for i in range(0, len(buttons), width)]}
 
 
-@dp.message(F.text == "📆 Отчёт за неделю")
-async def report_week(message: Message):
-    await message.answer(make_report("week"))
+class Telegram:
+    def __init__(self, token):
+        self.url = f"https://api.telegram.org/bot{token}/"
+
+    def call(self, method, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(self.url + method, data=body, headers={"Content-Type": "application/json; charset=utf-8"})
+        with urllib.request.urlopen(request, timeout=50) as response:
+            result = json.load(response)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", "Telegram API error"))
+        return result["result"]
+
+    def send(self, chat, text, options=None):
+        payload = {"chat_id": chat, "text": text}
+        if options:
+            payload["reply_markup"] = keyboard(options)
+        self.call("sendMessage", payload)
+
+    def document(self, chat, name, content):
+        boundary = "----buildledger" + str(int(time.time() * 1000))
+        data = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{name}\"\r\nContent-Type: text/csv\r\n\r\n"
+        ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        request = urllib.request.Request(self.url + "sendDocument", data=data, headers={"Content-Type": "multipart/form-data; boundary=" + boundary})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.load(response)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", "Telegram upload error"))
 
 
-@dp.message(F.text == "📊 Отчёт за месяц")
-async def report_month(message: Message):
-    await message.answer(make_report("month"))
+def menu(bot, chat, is_owner=False):
+    options = [("Расход", "new:expense"), ("Приход", "new:income"), ("Перевод", "new:transfer"), ("Операции", "ops:list"), ("Мой отчёт", "report:menu"), ("Мои остатки", "balance")]
+    if is_owner:
+        options.extend([("Общий отчёт", "all:menu"), ("Пользователи", "users:list")])
+    bot.send(chat, "Учёт стройки. Выбери действие:", options)
 
 
-@dp.message(F.text == "⬅️ Назад")
-async def back(message: Message):
-    await message.answer("Выбери действие:", reply_markup=main_kb)
+def prompt(bot, db, chat, d, uid=0):
+    step = d["step"]
+    if step == "project":
+        options = [(r["name"], f"proj:{r['id']}") for r in names(db, "projects", uid)]
+        options.append(("Общие расходы / без объекта", "proj:0"))
+        bot.send(chat, "Выбери объект. Добавить: /project Название", options)
+    elif step == "stage":
+        bot.send(chat, "Этап расходов:", [(x, f"stage:{i}") for i, x in enumerate(STAGES)])
+    elif step == "cost_type":
+        bot.send(chat, "Тип затрат:", [(x, f"type:{i}") for i, x in enumerate(COST_TYPES)])
+    elif step == "source":
+        bot.send(chat, "Откуда поступили деньги?", [(x, f"source:{i}") for i, x in enumerate(SOURCES)])
+    elif step in ("account", "from_account", "to_account"):
+        excluded = d.get("from_account_id") if step == "to_account" else None
+        options = [(r["name"], f"acct:{r['id']}") for r in names(db, "accounts", uid) if r["id"] != excluded]
+        label = "Счёт отправителя:" if step == "from_account" else "Счёт получателя:" if step == "to_account" else "Откуда оплачено?" if d["kind"] == "expense" else "Куда поступили деньги?"
+        bot.send(chat, label + " Добавить счёт: /account Название", options)
+    elif step == "currency":
+        bot.send(chat, "Выбери валюту операции:", [("Гривны (UAH)", "currency:UAH"), ("Доллары (USD)", "currency:USD")])
+    elif step == "amount":
+        bot.send(chat, f"Напиши сумму в {'гривнах' if d.get('currency', 'UAH') == 'UAH' else 'долларах'}, например 12500,50.")
+    elif step == "date":
+        bot.send(chat, "Дата операции:", [("Сегодня", "date:today"), ("Другая дата", "date:custom")])
+    elif step == "date_text":
+        bot.send(chat, "Напиши дату ГГГГ-ММ-ДД.")
+    elif step == "comment":
+        bot.send(chat, "Напиши комментарий или нажми «Пропустить».", [("Пропустить", "comment:skip")])
+    elif step == "confirm":
+        verb = "Подтвердить изменение" if d.get("edit_id") else "Сохранить"
+        bot.send(chat, description(db, d, uid) + "\n\n" + ("Применить изменения к операции?" if d.get("edit_id") else "Сохранить?"), [(verb, "save"), ("Отмена", "cancel")])
 
 
-@dp.message()
-async def handle_text(message: Message):
-    state = user_state.get(message.from_user.id)
+def description(db, d, uid=0):
+    title = {"income": "Приход", "expense": "Расход", "transfer": "Перевод"}[d["kind"]]
+    line = [title + ": " + money(d["amount_kop"], d.get("currency", "UAH")), "Дата: " + d["occurred_on"]]
+    if d["kind"] != "transfer":
+        r = db.execute("SELECT name FROM projects WHERE id=? AND owner_id=?", (d.get("project_id"), uid)).fetchone()
+        line.append("Объект: " + (r[0] if r else "Общие / без объекта"))
+    if d["kind"] == "expense":
+        line.extend(["Этап: " + d["category"], "Тип: " + d["cost_type"]])
+    if d["kind"] == "income":
+        line.append("Источник: " + d["source"])
+    for key, label in (("account_id", "Счёт"), ("from_account_id", "Откуда"), ("to_account_id", "Куда")):
+        if key in d:
+            r = db.execute("SELECT name FROM accounts WHERE id=? AND owner_id=?", (d[key], uid)).fetchone()
+            line.append(label + ": " + (r[0] if r else "Недоступен"))
+    if d.get("comment"):
+        line.append("Комментарий: " + d["comment"])
+    return "\n".join(line)
 
-    if not state:
-        await message.answer("Сначала выбери действие.", reply_markup=main_kb)
-        return
 
-    if state.get("waiting_custom_category"):
-        state["category"] = message.text
-        state["waiting_custom_category"] = False
+def next_step(d, step):
+    if step == "project":
+        return "stage" if d["kind"] == "expense" else "source"
+    if step == "stage": return "cost_type"
+    if step in ("cost_type", "source"): return "account"
+    if step == "from_account": return "to_account"
+    if step in ("account", "to_account"): return "currency"
+    if step == "currency": return "amount"
+    if step == "amount": return "date"
+    if step in ("date", "date_text"): return "comment"
+    if step == "comment": return "confirm"
+    raise ValueError("Unknown step")
 
-        await message.answer(
-            "Теперь введи сумму.\n\n"
-            "Примеры:\n"
-            "1000 грн\n"
-            "100 usd\n"
-            "100 $"
-        )
-        return
 
-    budget = state.get("budget")
-    action = state.get("action")
-    category = state.get("category")
+def advance(bot, db, chat, uid, d):
+    d["step"] = next_step(d, d["step"])
+    set_draft(db, uid, d)
+    prompt(bot, db, chat, d, uid)
 
-    if not budget:
-        await message.answer("Сначала выбери Влад / Валера / Общий.", reply_markup=budget_kb)
-        return
 
-    if not category:
-        await message.answer("Сначала выбери категорию.", reply_markup=main_kb)
-        return
+def report_text(db, start, end, pid, user_id=None):
+    rows = rows_for(db, start, end, pid, user_id)
+    totals = summary(rows)
+    name = "Все объекты" if pid is None else db.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()[0]
+    lines = [f"Отчёт: {name}", f"Период: {start or 'с начала'} — {end or 'сегодня'}"]
+    for currency in CURRENCIES:
+        t = totals[currency]
+        lines.extend(["", "Гривны (UAH):" if currency == "UAH" else "Доллары (USD):", "Приход денег:", "  Вложения и займы: " + money(t["financing"], currency), "  От покупателей: " + money(t["sales"], currency), "  Возвраты: " + money(t["refunds"], currency), "Расходы: " + money(t["expense"], currency), "Изменение денег: " + money(t["cash_net"], currency)])
+        if t["by_stage"]:
+            lines.extend(["По этапам:"] + [f"  {k}: {money(v, currency)}" for k, v in sorted(t["by_stage"].items())])
+        if t["by_source"]:
+            lines.extend(["Источники прихода:"] + [f"  {k}: {money(v, currency)}" for k, v in sorted(t["by_source"].items())])
+    if user_id is None:
+        lines.append("\nПо пользователям:")
+        for user in db.execute("SELECT id,name FROM users ORDER BY id"):
+            per_user = summary(row for row in rows if row["user_id"] == user["id"])
+            lines.append(f"  {user['name']} (ID {user['id']}): " + "; ".join(money(per_user[c]["cash_net"], c) for c in CURRENCIES))
+    return "\n".join(lines), rows, name
 
+
+def show_report(bot, db, chat, start, end, pid, user_id=None):
+    txt, rows, name = report_text(db, start, end, pid, user_id)
+    csv_button = f"csvall:{start or '0'}:{end or '0'}" if user_id is None else f"csv:{start or '0'}:{end or '0'}:{pid or 0}"
+    bot.send(chat, txt[:4000] + ("\n…" if len(txt) > 4000 else ""), [("Скачать CSV для Excel", csv_button), ("Меню", "menu")])
+
+
+def show_operations(bot, db, chat, user_id):
+    rows = rows_for(db, user_id=user_id)[-10:][::-1]
+    if not rows:
+        bot.send(chat, "Пока нет сохранённых операций.", [("Меню", "menu")]); return
+    options = []
+    for row in rows:
+        label = {"expense": "Расход", "income": "Приход", "transfer": "Перевод"}[row["kind"]]
+        options.append((f"№{row['id']} · {label} · {money(row['amount_kop'], row['currency'])}", f"op:view:{row['id']}"))
+    options.append(("Меню", "menu"))
+    bot.send(chat, "Последние операции. Выбери запись для просмотра, изменения или удаления:", options)
+
+
+def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
+    d = draft(db, uid)
+    if value == "menu": menu(bot, chat, uid == owner_id); return
+    if value == "cancel":
+        clear_draft(db, uid); bot.send(chat, "Отменено."); menu(bot, chat, uid == owner_id); return
+    if value.startswith("new:"):
+        kind = value.split(":")[1]
+        if kind not in ("income", "expense", "transfer"): return
+        d = {"kind": kind, "step": "from_account" if kind == "transfer" else "project"}
+        set_draft(db, uid, d); prompt(bot, db, chat, d, uid); return
+    if value == "ops:list":
+        show_operations(bot, db, chat, uid); return
+    if value.startswith(("op:view:", "op:edit:", "op:delete:", "op:delconfirm:")):
+        try:
+            action, _, raw_id = value.split(":", 2)
+            if action != "op" or not raw_id.isdigit(): return
+            operation_id = int(raw_id)
+            row = operation_row(db, operation_id, uid)
+        except (ValueError, TypeError):
+            return
+        if row is None:
+            bot.send(chat, "Операция не найдена в твоём учёте.", [("К списку", "ops:list"), ("Меню", "menu")]); return
+        action = value.split(":", 2)[1]
+        if action == "view":
+            bot.send(chat, operation_text(db, row), [("Редактировать", f"op:edit:{operation_id}"),
+                                                     ("Удалить", f"op:delete:{operation_id}"),
+                                                     ("К списку", "ops:list")]); return
+        if action == "edit":
+            edit_draft = {"kind": row["kind"], "step": "from_account" if row["kind"] == "transfer" else "project", "edit_id": operation_id}
+            set_draft(db, uid, edit_draft)
+            bot.send(chat, f"Редактирование операции №{operation_id}. Пройди форму заново и подтверди сохранение; текущая запись изменится на месте.")
+            prompt(bot, db, chat, edit_draft, uid); return
+        if action == "delete":
+            bot.send(chat, f"Удалить операцию №{operation_id}? Это действие нельзя отменить.",
+                     [("Да, удалить", f"op:delconfirm:{operation_id}"), ("Назад", f"op:view:{operation_id}")]); return
+        if action == "delconfirm":
+            with db:
+                cursor = db.execute("DELETE FROM operations WHERE id=? AND user_id=?", (operation_id, uid))
+                if cursor.rowcount:
+                    bump_revision(db)
+            if cursor.rowcount:
+                bot.send(chat, f"Операция №{operation_id} удалена. Отчёты и таблица обновятся.")
+            else:
+                bot.send(chat, "Операция уже удалена или не найдена.")
+            show_operations(bot, db, chat, uid); return
+    if value == "balance":
+        b = balances(db, uid)
+        bot.send(chat, "Остатки по кассам (с начала учёта):\n" + "\n".join(f"{x[0]}: {money(x[1]['UAH'], 'UAH')}; {money(x[1]['USD'], 'USD')}" for x in b.values()), [("Меню", "menu")]); return
+    if value == "report:menu":
+        bot.send(chat, "Выбери период. Свой период: /report ГГГГ-ММ-ДД ГГГГ-ММ-ДД", [("Текущий месяц", "rp:month"), ("Весь период", "rp:all")]); return
+    if value == "users:list" and uid == owner_id:
+        users = db.execute("SELECT id,name,active FROM users ORDER BY id").fetchall()
+        bot.send(chat, "Пользователи:\n" + "\n".join(f"{r['name']} — {r['id']}" + (" (отключён)" if not r['active'] else "") for r in users) + "\n\nДобавить: /adduser ID Имя\nПереименовать: /renameuser ID Имя\nОтключить: /removeuser ID"); return
+    if value == "all:menu" and uid == owner_id:
+        bot.send(chat, "Общий отчёт всех пользователей:", [("Текущий месяц", "all:month"), ("Весь период", "all:all")]); return
+    if value in ("all:month", "all:all") and uid == owner_id:
+        today = datetime.now(TZ).date().isoformat()
+        show_report(bot, db, chat, today[:7] + "-01" if value == "all:month" else None, today, None, None); return
+    if value.startswith("rp:"):
+        period = value.split(":")[1]
+        if period not in ("month", "all"): return
+        bot.send(chat, "Выбери объект:", [("Все объекты", f"rproj:{period}:0")] + [(r["name"], f"rproj:{period}:{r['id']}") for r in names(db, "projects", uid)]); return
+    if value.startswith("rproj:"):
+        _, period, sid = value.split(":")
+        if period not in ("month", "all") or not sid.isdigit(): return
+        today = datetime.now(TZ).date().isoformat()
+        start = today[:7] + "-01" if period == "month" else None
+        pid = int(sid) or None
+        if pid and not db.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=?", (pid, uid)).fetchone(): return
+        show_report(bot, db, chat, start, today, pid, uid); return
+    if value.startswith(("csv:", "csvall:")):
+        try:
+            parts = value.split(":")
+            aggregate = parts[0] == "csvall"
+            if aggregate and uid != owner_id: return
+            start, end = parts[1:3]
+            start = valid_date(start) if start != "0" else None
+            end = valid_date(end) if end != "0" else None
+            pid = None if aggregate else int(parts[3]) or None
+            if pid and not db.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=?", (pid, uid)).fetchone(): return
+        except (ValueError, TypeError, IndexError): return
+        rows = rows_for(db, start, end, pid, None if aggregate else uid)
+        name = "Все объекты" if not pid else db.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()[0]
+        bot.document(chat, "stroika_report.csv", csv_report(rows, start, end, name)); return
+    if not d:
+        bot.send(chat, "Это действие уже завершено. Начни новую запись через /start."); return
+    step = d["step"]
     try:
-        amount, currency, amount_uah, amount_usd, rate, comment = parse_amount(message.text)
-    except Exception:
-        await message.answer(
-            "Введи сумму правильно.\n\n"
-            "Примеры:\n"
-            "1000 грн\n"
-            "100 usd\n"
-            "100 $"
-        )
+        if value.startswith("proj:") and step == "project":
+            pid = int(value.split(":")[1]);
+            if pid and not db.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=?", (pid, uid)).fetchone(): return
+            d["project_id"] = pid or None
+        elif value.startswith("stage:") and step == "stage":
+            d["category"] = STAGES[int(value.split(":")[1])]
+        elif value.startswith("type:") and step == "cost_type":
+            d["cost_type"] = COST_TYPES[int(value.split(":")[1])]
+        elif value.startswith("source:") and step == "source":
+            d["source"] = SOURCES[int(value.split(":")[1])]
+        elif value.startswith("acct:") and step in ("account", "from_account", "to_account"):
+            aid = int(value.split(":")[1])
+            if not db.execute("SELECT 1 FROM accounts WHERE id=? AND owner_id=?", (aid, uid)).fetchone(): return
+            if step == "to_account" and aid == d.get("from_account_id"):
+                bot.send(chat, "Выбери другой счёт."); return
+            d[{"account": "account_id", "from_account": "from_account_id", "to_account": "to_account_id"}[step]] = aid
+        elif value.startswith("currency:") and step == "currency":
+            currency = value.split(":", 1)[1]
+            if currency not in CURRENCIES: return
+            d["currency"] = currency
+        elif value == "date:today" and step == "date":
+            d["occurred_on"] = datetime.now(TZ).date().isoformat()
+        elif value == "date:custom" and step == "date":
+            d["step"] = "date_text"; set_draft(db, uid, d); prompt(bot, db, chat, d); return
+        elif value == "comment:skip" and step == "comment":
+            d["comment"] = ""
+        elif value == "save" and step == "confirm":
+            if d.get("edit_id"):
+                ident = d["edit_id"]
+                update_operation(db, d, ident, uid)
+                clear_draft(db, uid); bot.send(chat, f"Операция №{ident} изменена.")
+            else:
+                ident = record(db, d, update_id, uid)
+                clear_draft(db, uid); bot.send(chat, f"Сохранено. Операция №{ident}.")
+            menu(bot, chat, uid == owner_id); return
+        else:
+            bot.send(chat, "Кнопка устарела. Продолжи текущий шаг:"); prompt(bot, db, chat, d, uid); return
+    except (ValueError, IndexError, KeyError):
+        bot.send(chat, "Кнопка устарела. Продолжи текущий шаг:"); prompt(bot, db, chat, d, uid); return
+    advance(bot, db, chat, uid, d)
+
+
+def handle_message(bot, db, chat, uid, text, owner_id=0):
+    if text.startswith(("/start", "/menu", "/help")):
+        menu(bot, chat, uid == owner_id); return
+    if text.startswith("/cancel"):
+        clear_draft(db, uid); bot.send(chat, "Отменено."); menu(bot, chat, uid == owner_id); return
+    if text.startswith("/adduser ") and uid == owner_id:
+        match = re.fullmatch(r"/adduser\s+(\d{3,20})\s+([^\n]{1,80})", text)
+        if not match or int(match[1]) >= 2**63:
+            bot.send(chat, "Формат: /adduser 123456789 Имя"); return
+        new_id, name = int(match[1]), match[2].strip()
+        if not name:
+            bot.send(chat, "Укажи имя."); return
+        with db:
+            db.execute("INSERT INTO users(id,name,active) VALUES (?,?,1) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1", (new_id, name))
+            for account in ("Наличные", "Карта", "Счёт"):
+                db.execute("INSERT OR IGNORE INTO accounts(owner_id,name) VALUES (?,?)", (new_id, account))
+        bot.send(chat, f"Добавлен: {name} (ID {new_id}). Пусть напишет боту /start."); return
+    if text.startswith("/renameuser ") and uid == owner_id:
+        match = re.fullmatch(r"/renameuser\s+(\d{3,20})\s+([^\n]{1,80})", text)
+        if not match or int(match[1]) >= 2**63:
+            bot.send(chat, "Формат: /renameuser 123456789 Имя"); return
+        target, name = int(match[1]), match[2].strip()
+        if not name:
+            bot.send(chat, "Укажи имя."); return
+        with db:
+            changed = db.execute("UPDATE users SET name=? WHERE id=?", (name, target)).rowcount
+        bot.send(chat, f"Имя обновлено: {name}." if changed else "Пользователь не найден."); return
+    if text.startswith("/removeuser ") and uid == owner_id:
+        match = re.fullmatch(r"/removeuser\s+(\d{3,20})", text)
+        if not match or int(match[1]) >= 2**63 or int(match[1]) == owner_id:
+            bot.send(chat, "Формат: /removeuser 123456789 (владельца отключить нельзя)"); return
+        with db:
+            changed = db.execute("UPDATE users SET active=0 WHERE id=?", (int(match[1]),)).rowcount
+            db.execute("DELETE FROM drafts WHERE user_id=?", (int(match[1]),))
+        bot.send(chat, "Доступ отключён. Старые записи сохранены." if changed else "Пользователь не найден."); return
+    if text == "/users" and uid == owner_id:
+        handle_callback(bot, db, chat, uid, 0, "users:list", owner_id); return
+    if text == "/operations":
+        show_operations(bot, db, chat, uid); return
+    if text.startswith("/allreport ") and uid == owner_id:
+        parts = text.split()
+        try:
+            if len(parts) != 3: raise ValueError("Пример: /allreport 2026-09-01 2026-09-30")
+            start, end = map(valid_date, parts[1:])
+            if end < start: raise ValueError("Конец периода раньше начала.")
+        except ValueError as exc:
+            bot.send(chat, str(exc)); return
+        show_report(bot, db, chat, start, end, None, None); return
+    if text.startswith("/project ") or text.startswith("/account "):
+        command, name = text.split(" ", 1)
+        name = name.strip()
+        if not name or len(name) > 80:
+            bot.send(chat, "Название: от 1 до 80 символов."); return
+        table = "projects" if command == "/project" else "accounts"
+        with db:
+            db.execute(f"INSERT OR IGNORE INTO {table}(owner_id,name) VALUES (?,?)", (uid, name))
+        bot.send(chat, "Добавлено: " + name)
+        d = draft(db, uid)
+        if d and d["step"] in ("project", "account", "from_account", "to_account"): prompt(bot, db, chat, d, uid)
         return
+    if text.startswith("/report "):
+        parts = text.split()
+        if len(parts) != 3:
+            bot.send(chat, "Пример: /report 2026-09-01 2026-09-30"); return
+        try:
+            start, end = map(valid_date, parts[1:])
+            if end < start: raise ValueError("Конец периода раньше начала.")
+        except ValueError as exc:
+            bot.send(chat, str(exc)); return
+        show_report(bot, db, chat, start, end, None, uid); return
+    d = draft(db, uid)
+    if not d:
+        bot.send(chat, "Нажми /start, чтобы открыть меню."); return
+    try:
+        if d["step"] == "amount":
+            d["amount_kop"] = parse_amount(text)
+        elif d["step"] == "date_text":
+            d["occurred_on"] = valid_date(text.strip())
+        elif d["step"] == "comment":
+            if len(text) > 500: raise ValueError("Комментарий до 500 символов.")
+            d["comment"] = text.strip()
+        else:
+            bot.send(chat, "Выбери вариант кнопкой."); prompt(bot, db, chat, d, uid); return
+    except ValueError as exc:
+        bot.send(chat, str(exc)); return
+    advance(bot, db, chat, uid, d)
 
-    add_operation(
-        budget=budget,
-        op_type=action,
-        category=category,
-        amount=amount,
-        currency=currency,
-        amount_uah=amount_uah,
-        amount_usd=amount_usd,
-        usd_rate=rate,
-        comment=comment,
-    )
 
-    await message.answer(
-        f"✅ Записано\n\n"
-        f"Кому: {budget}\n"
-        f"Тип: {action}\n"
-        f"Категория: {category}\n"
-        f"Сумма: {amount:.2f} {currency}\n"
-        f"В гривне: {amount_uah:.2f} грн\n"
-        f"В долларах: {amount_usd:.2f} $\n"
-        f"Курс USD: {rate}",
-        reply_markup=main_kb,
-    )
-
-    user_state[message.from_user.id] = {}
-
-
-async def auto_reports():
+def run(bot, db, owner_id, sync=None):
+    saved = db.execute("SELECT value FROM settings WHERE key='offset'").fetchone()
+    offset = int(saved[0]) if saved else 0
+    if sync:
+        sync(db)
     while True:
-        now = datetime.now()
-        chat_id = get_chat_id()
+        try:
+            updates = bot.call("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]})
+            for update in updates:
+                uid = (update.get("message") or update.get("callback_query") or {}).get("from", {}).get("id")
+                payload = update.get("message") or update.get("callback_query") or {}
+                chat = (payload.get("chat") or (payload.get("message") or {}).get("chat") or {}).get("id")
+                active = uid is not None and db.execute("SELECT 1 FROM users WHERE id=? AND active=1", (uid,)).fetchone()
+                if active and chat == uid:  # private chat only
+                    try:
+                        if "callback_query" in update:
+                            bot.call("answerCallbackQuery", {"callback_query_id": payload["id"]})
+                            handle_callback(bot, db, chat, uid, update["update_id"], payload.get("data", ""), owner_id)
+                        elif "text" in payload:
+                            handle_message(bot, db, chat, uid, payload["text"].strip(), owner_id)
+                        if sync:
+                            sync(db)
+                    except Exception:
+                        logging.exception("Update %s failed", update["update_id"])
+                        continue  # retry this update rather than silently lose a financial record
+                elif chat == uid and "text" in payload and payload["text"].strip().startswith("/start"):
+                    bot.send(chat, f"Доступ закрыт. Твой Telegram ID: {uid}. Передай его владельцу бота.")
+                offset = update["update_id"] + 1
+                with db:
+                    db.execute("INSERT INTO settings(key,value) VALUES ('offset',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),))
+            if sync:
+                sync(db)
+        except (urllib.error.URLError, TimeoutError, RuntimeError):
+            logging.exception("Telegram connection error")
+            time.sleep(5)
 
-        if chat_id:
-            if now.weekday() == 6 and now.hour == 21 and now.minute == 0:
-                await bot.send_message(
-                    chat_id,
-                    "🤖 Автоотчёт за неделю\n\n" + make_report("week")
-                )
 
-            if now.day == 1 and now.hour == 9 and now.minute == 0:
-                await bot.send_message(
-                    chat_id,
-                    "🤖 Автоотчёт за месяц\n\n" + make_report("month")
-                )
-
-        await asyncio.sleep(60)
-
-
-async def main():
-    init_db()
-    init_excel()
-    asyncio.create_task(auto_reports())
-    await dp.start_polling(bot)
+def main():
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    raw_users = os.environ.get("ALLOWED_USER_IDS", "")
+    try: allowed = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
+    except ValueError: raise SystemExit("ALLOWED_USER_IDS: comma separated numeric Telegram IDs")
+    if not token or not allowed:
+        raise SystemExit("Set TELEGRAM_BOT_TOKEN and ALLOWED_USER_IDS before starting")
+    owner_id = int(os.environ.get("OWNER_USER_ID") or allowed[0])
+    path = Path(os.environ.get("BOT_DB_PATH", "./data/ledger.sqlite3"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    db = connect(path, owner_id, allowed)
+    sync = None
+    if os.environ.get("GOOGLE_SHEET_ID"):
+        from sheets_sync import build_sync
+        sync = build_sync(os.environ["GOOGLE_SHEET_ID"], os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+    run(Telegram(token), db, owner_id, sync)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

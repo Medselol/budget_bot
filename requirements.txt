@@ -1,3 +1,1 @@
-aiogram==3.28.2
-openpyxl==3.1.5
-psycopg2-binary==2.9.10
+google-auth[requests]>=2.35,<3
