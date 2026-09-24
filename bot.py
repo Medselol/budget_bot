@@ -126,6 +126,8 @@ def connect(path, owner_id=0, initial_users=()):
     init_receipts(db)
     from control_data import init as init_controls
     init_controls(db)
+    from site_reports import init as init_site_reports
+    init_site_reports(db)
     from audit_log import init as init_audit
     init_audit(db)
     from navigation import init as init_navigation
@@ -358,7 +360,7 @@ def menu(bot, chat, is_owner=False, role=None):
         options += [("Общий отчёт PDF", "all:menu"), ("Участники и счета", "people:menu"), ("Балансы участников", "team:balances")]
     if role in ("owner", "editor"):
         options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu"), ("Проверка расходов", "rc:list")]
-    options += [("Контроль стройки", "ctl:home")]
+    options += [("Контроль стройки", "ctl:home"), ("Фотоотчёты стройки", "site:home")]
     if role in ("foreman", "member"):
         options += [("Заявки на деньги", "ctl:req:list:open:0")]
     bot.send(chat, "Учёт стройки. Выбери действие:", options)
@@ -734,6 +736,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from site_reports import callback as site_callback
+    if site_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from controls import callback as control_callback
     if control_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from receipts import callback as receipt_callback
@@ -751,6 +755,8 @@ def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
 def _dispatch_message(bot, db, chat, uid, text, owner_id=0):
     from access import message, permitted
     if not permitted(bot, db, chat, uid, owner_id, text, True): return
+    from site_reports import message as site_message
+    if site_message(bot, db, chat, uid, text, owner_id): return
     from controls import message as control_message
     if control_message(bot, db, chat, uid, text, owner_id): return
     from receipts import message as receipt_message
@@ -778,9 +784,10 @@ def handle_message(bot, db, chat, uid, text, owner_id=0):
 def handle_media(bot, db, chat, uid, payload, update_id, owner_id=0):
     from navigation import dispatch
     from receipts import media
+    from site_reports import media as site_media
     from controls import media as control_media
     dispatch(bot, db, chat, uid, owner_id, '',
-             lambda api: control_media(api, db, chat, uid, payload, update_id, owner_id) or media(api, db, chat, uid, payload, update_id, owner_id))
+             lambda api: site_media(api, db, chat, uid, payload, update_id, owner_id) or control_media(api, db, chat, uid, payload, update_id, owner_id) or media(api, db, chat, uid, payload, update_id, owner_id))
 
 
 def run(bot, db, owner_id, sync=None):

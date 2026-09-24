@@ -74,6 +74,7 @@ def purge(db, target, owner):
             OR to_account_id IN (SELECT id FROM accounts WHERE owner_id=?)
             OR project_id IN (SELECT id FROM projects WHERE owner_id=?) LIMIT 1""",(target,)*5).fetchone()
         linked = linked or db.execute('SELECT 1 FROM funding_requests WHERE user_id=? LIMIT 1',(target,)).fetchone()
+        linked = linked or db.execute('SELECT 1 FROM site_reports WHERE user_id=? LIMIT 1',(target,)).fetchone()
         db.execute('DELETE FROM drafts WHERE user_id=?',(target,))
         if linked:
             db.execute('UPDATE users SET deleted=1,active=0 WHERE id=?',(target,))

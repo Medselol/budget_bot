@@ -8,7 +8,7 @@ ROOT='Учёт стройки. Выбери действие:'
 def init(db):
     db.execute('CREATE TABLE IF NOT EXISTS navigation(user_id INTEGER PRIMARY KEY, data TEXT NOT NULL)')
     db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('navigation_revision','0')")
-    for table in ('operations','users','accounts','projects','receipts','expense_reviews','budgets','funding_requests','request_files','obligations','obligation_payments'):
+    for table in ('operations','users','accounts','projects','receipts','expense_reviews','budgets','funding_requests','request_files','obligations','site_reports','site_photos','obligation_payments'):
         for action in ('INSERT','UPDATE','DELETE'):
             db.execute(f'''CREATE TRIGGER IF NOT EXISTS nav_{table}_{action.lower()} AFTER {action} ON {table}
                 BEGIN UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='navigation_revision'; END''')

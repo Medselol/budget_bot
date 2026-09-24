@@ -18,7 +18,7 @@ def init(db):
     CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABORT,'Журнал изменений нельзя редактировать'); END;
     CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABORT,'Журнал изменений нельзя удалять'); END;
     ''')
-    tables=('operations','users','accounts','projects','expense_reviews','receipts','budgets','funding_requests','request_files','obligations','obligation_payments','weekly_subscriptions')
+    tables=('operations','users','accounts','projects','expense_reviews','receipts','budgets','funding_requests','request_files','obligations','site_reports','site_photos','obligation_payments','weekly_subscriptions')
     for table in tables:
         cols=[r['name'] for r in db.execute(f'PRAGMA table_info({table})') if r['name'] not in ('content','file_id','token')]
         pk='operation_id' if table=='expense_reviews' else 'user_id' if table=='weekly_subscriptions' else 'id'
@@ -49,4 +49,4 @@ def detail(row):
         if before.get(k)!=after.get(k): lines.append(f'{FIELD_NAMES.get(k,k)}: {before.get(k,"—")} → {after.get(k,"—")}')
     return '\n'.join(lines)
 
-FIELD_NAMES = {'id':'Номер','user_id':'Участник ID','owner_id':'Владелец счёта ID','name':'Имя / название','active':'Доступ','deleted':'Удалён из списка','role':'Роль','kind':'Тип','occurred_on':'Дата','amount_kop':'Сумма в копейках / центах','currency':'Валюта','comment':'Комментарий','category':'Этап','cost_type':'Тип затрат','source':'Источник','account_id':'Счёт ID','from_account_id':'Откуда, счёт ID','to_account_id':'Куда, счёт ID','status':'Статус','reason':'Пояснение','reviewer_id':'Проверил ID','operation_id':'Операция №','purpose':'Назначение','due_on':'Срок','direction':'Направление','counterparty':'Контрагент','decision':'Решение','stage':'Этап','cancelled':'Отменён','filename':'Файл','request_id':'Заявка №','obligation_id':'Платёж №','created_by':'Создал ID','enabled':'Включено'}
+FIELD_NAMES = {'work_date':'Дата работ','area':'Место / секция','work':'Выполненные работы','problems':'Проблемы','next_work':'Следующий шаг','review_note':'Замечание','report_id':'Фотоотчёт №','id':'Номер','user_id':'Участник ID','owner_id':'Владелец счёта ID','name':'Имя / название','active':'Доступ','deleted':'Удалён из списка','role':'Роль','kind':'Тип','occurred_on':'Дата','amount_kop':'Сумма в копейках / центах','currency':'Валюта','comment':'Комментарий','category':'Этап','cost_type':'Тип затрат','source':'Источник','account_id':'Счёт ID','from_account_id':'Откуда, счёт ID','to_account_id':'Куда, счёт ID','status':'Статус','reason':'Пояснение','reviewer_id':'Проверил ID','operation_id':'Операция №','purpose':'Назначение','due_on':'Срок','direction':'Направление','counterparty':'Контрагент','decision':'Решение','stage':'Этап','cancelled':'Отменён','filename':'Файл','request_id':'Заявка №','obligation_id':'Платёж №','created_by':'Создал ID','enabled':'Включено'}

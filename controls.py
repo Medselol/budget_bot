@@ -359,7 +359,7 @@ def _callback(api,db,chat,uid,update_id,value,owner):
 
 
 def entity_name(name):
-    return {'operations':'Операция','users':'Участник','accounts':'Счёт','projects':'Объект','expense_reviews':'Проверка чека','receipts':'Чек','budgets':'Бюджет','funding_requests':'Заявка','request_files':'Документ заявки','obligations':'Обязательство','obligation_payments':'Оплата','weekly_subscriptions':'Подписка'}.get(name,name)
+    return {'site_reports':'Фотоотчёт стройки','site_photos':'Фото стройки','operations':'Операция','users':'Участник','accounts':'Счёт','projects':'Объект','expense_reviews':'Проверка чека','receipts':'Чек','budgets':'Бюджет','funding_requests':'Заявка','request_files':'Документ заявки','obligations':'Обязательство','obligation_payments':'Оплата','weekly_subscriptions':'Подписка'}.get(name,name)
 
 
 def message(api,db,chat,uid,text,owner):
