@@ -33,7 +33,7 @@ def lookup(api,db,text):
 
 
 def listing(api,db,chat,page=0,archived=False):
-    rows=db.execute('SELECT * FROM users WHERE active=? ORDER BY name,id',(0 if archived else 1,)).fetchall()
+    rows=db.execute('SELECT * FROM users WHERE deleted=0 AND active=? ORDER BY name,id',(0 if archived else 1,)).fetchall()
     route = 'archive' if archived else 'page'
     page=max(0,min(page,max(0,(len(rows)-1)//12)))
     options=[('Добавить по @нику','participant:add'),('Найти участника','participant:find')]
@@ -48,7 +48,7 @@ def listing(api,db,chat,page=0,archived=False):
 
 
 def card(api,db,chat,target,uid,owner):
-    r=db.execute('SELECT u.*,c.username FROM users u LEFT JOIN telegram_contacts c ON c.id=u.id WHERE u.id=?',(target,)).fetchone()
+    r=db.execute('SELECT u.*,c.username FROM users u LEFT JOIN telegram_contacts c ON c.id=u.id WHERE u.id=? AND u.deleted=0',(target,)).fetchone()
     if not r:
         api.send(chat,'Участник не найден.');return
     text=f"{r['name']}\n"+('@'+r['username']+'\n' if r['username'] else '')+f"ID: {target}\nРоль: {ledger.ROLE_NAMES.get(r['role'],r['role'])}\nДоступ: "+('открыт' if r['active'] else 'закрыт')
@@ -56,8 +56,33 @@ def card(api,db,chat,target,uid,owner):
     if target!=owner or uid==owner:options.append(('Переименовать',f'participant:rename:{target}'))
     if target!=owner:
         options += [('Изменить права',f'role:pick:{target}'),('Удалить участника' if r['active'] else 'Восстановить доступ',f"participant:{'remove' if r['active'] else 'restore'}:{target}")]
+    if target!=owner and not r['active']:
+        options.append(('Удалить из архива навсегда',f'participant:purge:{target}'))
     options.append(('К участникам','users:list'))
     api.send(chat,text,options)
+
+
+def purge(db, target, owner):
+    if target==owner: raise ValueError('Владельца удалить нельзя.')
+    with db:
+        row=db.execute('SELECT active,deleted FROM users WHERE id=?',(target,)).fetchone()
+        if not row or row['deleted']: raise ValueError('Участник уже удалён.')
+        if row['active']: raise ValueError('Сначала перенеси участника в архив.')
+        linked=db.execute("""SELECT 1 FROM operations WHERE user_id=?
+            OR account_id IN (SELECT id FROM accounts WHERE owner_id=?)
+            OR from_account_id IN (SELECT id FROM accounts WHERE owner_id=?)
+            OR to_account_id IN (SELECT id FROM accounts WHERE owner_id=?)
+            OR project_id IN (SELECT id FROM projects WHERE owner_id=?) LIMIT 1""",(target,)*5).fetchone()
+        db.execute('DELETE FROM drafts WHERE user_id=?',(target,))
+        if linked:
+            db.execute('UPDATE users SET deleted=1,active=0 WHERE id=?',(target,))
+        else:
+            db.execute('DELETE FROM accounts WHERE owner_id=?',(target,))
+            db.execute('DELETE FROM projects WHERE owner_id=?',(target,))
+            db.execute('DELETE FROM users WHERE id=?',(target,))
+        db.execute('DELETE FROM telegram_contacts WHERE id=?',(target,))
+        ledger.bump_revision(db)
+    return bool(linked)
 
 
 def callback(api,db,chat,uid,value,owner):
@@ -95,8 +120,21 @@ def callback(api,db,chat,uid,value,owner):
         target=int(p[2]);action=p[1]
         if target<=0 or target>=2**63:raise ValueError('Неверный ID.')
         if action=='view':card(api,db,chat,target,uid,owner);return True
-        if not db.execute('SELECT 1 FROM users WHERE id=?',(target,)).fetchone():raise ValueError('Участник не найден.')
+        if not db.execute('SELECT 1 FROM users WHERE id=? AND deleted=0',(target,)).fetchone():raise ValueError('Участник не найден.')
         if target==owner and (action!='rename' or uid!=owner):raise ValueError('Доступ владельца изменить нельзя.')
+        if action in ('purge','purgeconfirm'):
+            row=db.execute('SELECT name,active FROM users WHERE id=?',(target,)).fetchone()
+            if row['active']:raise ValueError('Сначала перенеси участника в архив.')
+            if action=='purge':
+                ledger.set_draft(db,uid,{'step':'participant_purge','target':target})
+                api.send(chat,f"Удалить {row['name']} из архива навсегда? Восстановить кнопкой будет нельзя. Пустой аккаунт будет удалён полностью. Если есть операции, они сохранятся в общем учёте, но участник исчезнет из списков.", [('Да, удалить навсегда',f'participant:purgeconfirm:{target}'),('Отмена','users:list')]);return True
+            d=ledger.draft(db,uid)
+            if not d or d.get('step')!='participant_purge' or d.get('target')!=target:
+                raise ValueError('Открой карточку и подтверди удаление заново.')
+            kept=purge(db,target,owner)
+            ledger.clear_draft(db,uid)
+            api.send(chat,'Участник удалён из архива.'+(' Финансовая история сохранена в общем учёте.' if kept else ' Пустой аккаунт удалён полностью.'))
+            listing(api,db,chat,archived=True);return True
         if action=='rename':
             ledger.set_draft(db,uid,{'step':'participant_rename','target':target})
             api.send(chat,'Введи новое имя для учёта (до 80 символов). Ник в Telegram не изменится.',[('Отмена','cancel')]);return True

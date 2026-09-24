@@ -15,19 +15,21 @@ def period_dates(period, today=None):
 
 
 def participant(db, target):
-    return db.execute('SELECT id,name,active FROM users WHERE id=?', (target,)).fetchone()
+    return db.execute('SELECT id,name,active FROM users WHERE id=? AND deleted=0', (target,)).fetchone()
 
 
-def pick_participant(api, db, chat, prefix, page=0):
-    users = db.execute('SELECT id,name,active FROM users ORDER BY name,id').fetchall()
+def pick_participant(api, db, chat, prefix, page=0, archived=False):
+    users = db.execute('SELECT id,name,active FROM users WHERE deleted=0 AND active=? ORDER BY name,id', (0 if archived else 1,)).fetchall()
+    route = 'archive' if archived else 'page'
     page = max(0, min(page, max(0, (len(users)-1)//12)))
     options = [(r['name']+(' (отключён)' if not r['active'] else ''), f"{prefix}:{r['id']}") for r in users[page*12:(page+1)*12]]
     if prefix.startswith('overview:who:'):
         options.insert(0, ('Все участники', prefix+':all'))
-    if page: options.append(('← Назад', f'{prefix}:page:{page-1}'))
-    if (page+1)*12 < len(users): options.append(('Далее →', f'{prefix}:page:{page+1}'))
+    if page: options.append(('← Назад', f'{prefix}:{route}:{page-1}'))
+    if (page+1)*12 < len(users): options.append(('Далее →', f'{prefix}:{route}:{page+1}'))
+    options.append(('Действующие участники', f'{prefix}:page:0') if archived else ('Архив участников', f'{prefix}:archive:0'))
     options.append(('Меню', 'menu'))
-    api.send(chat, 'Выбери участника:', options)
+    api.send(chat, 'Архив участников:' if archived else 'Выбери участника:', options)
 
 
 def account_lines(db, target):
@@ -50,8 +52,8 @@ def callback(api, db, chat, uid, value, owner):
             pick_participant(api,db,chat,'overview:who:'+parts[2]);return True
         if parts[:2] == ['overview','who']:
             period=parts[2];start,end=period_dates(period)
-            if len(parts)==5 and parts[3]=='page':
-                pick_participant(api,db,chat,'overview:who:'+period,int(parts[4]));return True
+            if len(parts)==5 and parts[3] in ('page','archive'):
+                pick_participant(api,db,chat,'overview:who:'+period,int(parts[4]),archived=parts[3]=='archive');return True
             if len(parts)!=4: return True
             target=None if parts[3]=='all' else int(parts[3])
             if target is not None and not participant(db,target): raise ValueError('Участник не найден')
@@ -59,8 +61,8 @@ def callback(api, db, chat, uid, value, owner):
             return True
         if value=='people:menu':
             pick_participant(api,db,chat,'people:view');return True
-        if parts[:3]==['people','view','page'] and len(parts)==4:
-            pick_participant(api,db,chat,'people:view',int(parts[3]));return True
+        if parts[:2]==['people','view'] and len(parts)==4 and parts[2] in ('page','archive'):
+            pick_participant(api,db,chat,'people:view',int(parts[3]),archived=parts[2]=='archive');return True
         if parts[:2]==['people','view'] and len(parts)==3:
             target=int(parts[2]);u=participant(db,target)
             if not u: raise ValueError('Участник не найден')

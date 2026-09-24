@@ -8,7 +8,7 @@ def permitted(api, db, chat, uid, owner, value, message):
         return False
     common = value in ('menu', 'cancel', '/start', '/menu', '/help', '/cancel')
     if role == 'investor':
-        allowed = common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:')) or value=='team:balances'
+        allowed = common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:')) or value in ('team:balances','team:archive')
         if not allowed:
             api.send(chat, 'У тебя доступ наблюдателя: можно смотреть общие PDF-отчёты, менять записи нельзя.', [('Общий отчёт PDF', 'all:menu')])
         return allowed
@@ -49,7 +49,7 @@ def show_users(api, db, chat, owner):
 
 
 def accounts(db):
-    return db.execute("SELECT a.id,a.owner_id,a.name,u.name AS user_name FROM accounts a JOIN users u ON u.id=a.owner_id WHERE u.active=1 AND u.role!='investor' ORDER BY u.name,a.id").fetchall()
+    return db.execute("SELECT a.id,a.owner_id,a.name,u.name AS user_name FROM accounts a JOIN users u ON u.id=a.owner_id WHERE u.active=1 AND u.deleted=0 AND u.role!='investor' ORDER BY u.name,a.id").fetchall()
 
 
 def fund_prompt(api, db, chat, d):
@@ -104,15 +104,17 @@ def callback(api, db, chat, uid, update_id, value, owner):
                 db.execute('DELETE FROM drafts WHERE user_id=?',(target,))
             api.send(chat, 'Права обновлены: '+ledger.ROLE_NAMES[parts[3]] if cur.rowcount else 'Пользователь не найден.', [('К участникам','users:list')])
         return True
-    if value=='team:balances':
+    if value in ('team:balances','team:archive'):
         if not ledger.reader(db,uid,owner): return True
-        lines=['Балансы участников (с начала учёта):']
-        for u in db.execute('SELECT id,name FROM users ORDER BY name'):
+        archived = value=='team:archive'
+        lines=['Балансы архивных участников:' if archived else 'Балансы действующих участников (с начала учёта):']
+        for u in db.execute('SELECT id,name FROM users WHERE deleted=0 AND active=? ORDER BY name',(0 if archived else 1,)):
             lines.append('\n'+u['name'])
             for name,sums in ledger.balances(db,u['id']).values():
                 lines.append(name+': '+ '; '.join(ledger.money(sums[c],c) for c in ledger.CURRENCIES))
         text='\n'.join(lines)
         for i in range(0,len(text),3900): api.send(chat,text[i:i+3900])
+        api.send(chat,'Выбери список:', [('Действующие участники','team:balances') if archived else ('Архив участников','team:archive'),('Меню','menu')])
         return True
     if not value.startswith('fund:'): return False
     if not ledger.manager(db,uid,owner): return True

@@ -38,7 +38,7 @@ class ReportTests(unittest.TestCase):
         op_button=self.api.messages[-1][2][0][1]
         self.cb(789,op_button)
         self.assertNotIn('op:view:',str(self.api.messages[-1][2]))
-        self.cb(789,'team:balances');self.assertIn('600.00 грн',self.api.messages[-1][1])
+        self.cb(789,'team:balances');self.assertIn('600.00 грн',self.api.messages[-2][1])
     def test_foreman_income_full_flow_and_balance_menu(self):
         self.msg(456,'/start')
         self.assertEqual({x[0] for x in self.api.messages[-1][2]},{'Приход','Расход','Мой баланс'})

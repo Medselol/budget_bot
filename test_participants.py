@@ -69,6 +69,43 @@ class ParticipantTests(unittest.TestCase):
         self.cb('participant:restoreconfirm:456')
         self.assertIn('participant:view:456', [v for _,v in self.api.messages[-1][2]])
 
+    def test_empty_archived_user_permanent_deletion_requires_confirmation(self):
+        self.cb('participant:removeconfirm:456')
+        self.cb('participant:purgeconfirm:456')
+        self.assertIsNotNone(self.db.execute('SELECT 1 FROM users WHERE id=456').fetchone())
+        self.cb('participant:purge:456');self.cb('participant:purgeconfirm:456')
+        self.assertIsNone(self.db.execute('SELECT 1 FROM users WHERE id=456').fetchone())
+        self.assertFalse(bot.names(self.db,'accounts',456))
+        self.assertFalse(self.db.execute('PRAGMA foreign_key_check').fetchall())
+
+    def test_delete_with_history_hides_user_preserves_money_and_blocks_restore(self):
+        aid=bot.names(self.db,'accounts',456)[0]['id']
+        bot.record(self.db,dict(kind='income',account_id=aid,amount_kop=100,occurred_on='2026-09-24',currency='UAH'),1,456)
+        self.cb('participant:removeconfirm:456');self.cb('participant:purge:456');self.cb('participant:purgeconfirm:456')
+        self.assertIsNone(bot.role_for(self.db,456))
+        self.assertEqual(bot.summary(bot.rows_for(self.db))['UAH']['financing'],100)
+        self.cb('participant:restoreconfirm:456');self.assertIsNone(bot.role_for(self.db,456))
+        self.cb('participant:archive:0')
+        self.assertNotIn('participant:view:456',[v for _,v in self.api.messages[-1][2]])
+        self.cb('people:view:archive:0',789)
+        self.assertNotIn('people:view:456',[v for _,v in self.api.messages[-1][2]])
+
+    def test_archives_in_balances_and_accounts(self):
+        self.cb('participant:rename:456');self.msg('АрхивныйТест')
+        self.cb('participant:removeconfirm:456')
+        self.cb('team:balances',789);self.assertNotIn('АрхивныйТест',self.api.messages[-2][1])
+        self.cb('team:archive',789);self.assertIn('АрхивныйТест',self.api.messages[-2][1])
+        self.cb('people:menu',789);self.assertNotIn('people:view:456',[v for _,v in self.api.messages[-1][2]])
+        self.cb('people:view:archive:0',789);self.assertIn('people:view:456',[v for _,v in self.api.messages[-1][2]])
+
+    def test_permanent_delete_blocks_owner_active_users_and_investor(self):
+        for target in (123,456):
+            self.cb(f'participant:purge:{target}');self.cb(f'participant:purgeconfirm:{target}')
+            self.assertIsNotNone(bot.role_for(self.db,target))
+        self.cb('participant:removeconfirm:456')
+        self.cb('participant:purge:456',789);self.cb('participant:purgeconfirm:456',789)
+        self.assertIsNotNone(self.db.execute('SELECT 1 FROM users WHERE id=456').fetchone())
+
     def test_observers_and_members_cannot_manage(self):
         for uid in (456,789):
             for value in ('participant:add','participant:rename:123','participant:removeconfirm:123','participant:removeconfirm:456','participant:admit:editor'):

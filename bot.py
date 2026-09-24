@@ -104,6 +104,8 @@ def connect(path, owner_id=0, initial_users=()):
             db.execute("INSERT OR IGNORE INTO users(id,name) VALUES (?,?)", (uid, "Денис" if uid == owner_id else f"Участник {uid}"))
     if "role" not in {r["name"] for r in db.execute("PRAGMA table_info(users)")}:
         db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
+    if "deleted" not in {r["name"] for r in db.execute("PRAGMA table_info(users)")}:
+        db.execute("ALTER TABLE users ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
     db.execute("UPDATE users SET role='owner',active=1 WHERE id=?", (owner_id,))
     # Keep the owner's display name aligned with the configured owner account.
     db.execute("UPDATE users SET name='Денис' WHERE id=? AND name='Владелец'", (owner_id,))
@@ -321,8 +323,8 @@ ROLE_NAMES = {"owner": "Владелец", "editor": "Главный редак�
 
 
 def role_for(db, uid, owner_id=0):
-    row = db.execute("SELECT role,active FROM users WHERE id=?", (uid,)).fetchone()
-    if not row or not row["active"]: return None
+    row = db.execute("SELECT role,active,deleted FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["active"] or row["deleted"]: return None
     return "owner" if uid == owner_id else row["role"]
 
 
@@ -629,7 +631,7 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
         if not name:
             bot.send(chat, "Укажи имя."); return
         with db:
-            db.execute("INSERT INTO users(id,name,active) VALUES (?,?,1) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1", (new_id, name))
+            db.execute("INSERT INTO users(id,name,active) VALUES (?,?,1) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1,deleted=0", (new_id, name))
             for account in ("Наличные", "Карта", "Счёт"):
                 db.execute("INSERT OR IGNORE INTO accounts(owner_id,name) VALUES (?,?)", (new_id, account))
         from access import role_picker
@@ -743,7 +745,7 @@ def run(bot, db, owner_id, sync=None):
                 if uid is not None and chat == uid:
                     from participants import remember
                     remember(db, payload.get("from", {}))
-                active = uid is not None and db.execute("SELECT 1 FROM users WHERE id=? AND active=1", (uid,)).fetchone()
+                active = uid is not None and db.execute("SELECT 1 FROM users WHERE id=? AND active=1 AND deleted=0", (uid,)).fetchone()
                 if active and chat == uid:  # private chat only
                     try:
                         if "callback_query" in update:
