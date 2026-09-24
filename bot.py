@@ -59,6 +59,7 @@ def connect(path, owner_id=0, initial_users=()):
         CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(owner_id,name));
         CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(owner_id,name));
         CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS telegram_contacts (id INTEGER PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS drafts (user_id INTEGER PRIMARY KEY, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS operations (
@@ -105,7 +106,7 @@ def connect(path, owner_id=0, initial_users=()):
         db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
     db.execute("UPDATE users SET role='owner',active=1 WHERE id=?", (owner_id,))
     # Keep the owner's display name aligned with the configured owner account.
-    db.execute("UPDATE users SET name='Денис' WHERE id=?", (owner_id,))
+    db.execute("UPDATE users SET name='Денис' WHERE id=? AND name='Владелец'", (owner_id,))
     for name in ("Наличные", "Карта", "Счёт"):
         for row in db.execute("SELECT id FROM users"):
             db.execute("INSERT OR IGNORE INTO accounts(owner_id,name) VALUES (?,?)", (row[0], name))
@@ -710,6 +711,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from participants import callback as participant_callback
+    if participant_callback(bot, db, chat, uid, value, owner_id): return
     from reports import callback as report_callback
     if report_callback(bot, db, chat, uid, value, owner_id): return
     if callback(bot, db, chat, uid, update_id, value, owner_id): return
@@ -719,6 +722,8 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
 def handle_message(bot, db, chat, uid, text, owner_id=0):
     from access import message, permitted
     if not permitted(bot, db, chat, uid, owner_id, text, True): return
+    from participants import message as participant_message
+    if participant_message(bot, db, chat, uid, text, owner_id): return
     if message(bot, db, chat, uid, text, owner_id): return
     _handle_message(bot, db, chat, uid, text, owner_id)
 
@@ -735,6 +740,9 @@ def run(bot, db, owner_id, sync=None):
                 uid = (update.get("message") or update.get("callback_query") or {}).get("from", {}).get("id")
                 payload = update.get("message") or update.get("callback_query") or {}
                 chat = (payload.get("chat") or (payload.get("message") or {}).get("chat") or {}).get("id")
+                if uid is not None and chat == uid:
+                    from participants import remember
+                    remember(db, payload.get("from", {}))
                 active = uid is not None and db.execute("SELECT 1 FROM users WHERE id=? AND active=1", (uid,)).fetchone()
                 if active and chat == uid:  # private chat only
                     try:
@@ -749,7 +757,7 @@ def run(bot, db, owner_id, sync=None):
                         logging.exception("Update %s failed", update["update_id"])
                         continue  # retry this update rather than silently lose a financial record
                 elif chat == uid and "text" in payload and payload["text"].strip().startswith("/start"):
-                    bot.send(chat, f"Доступ закрыт. Твой Telegram ID: {uid}. Передай его владельцу бота.")
+                    bot.send(chat, f"Доступ закрыт. Твой Telegram ID: {uid}. Передай владельцу свой @ник (или этот ID, если ника нет). Он добавит тебя через «Пользователи».")
                 offset = update["update_id"] + 1
                 with db:
                     db.execute("INSERT INTO settings(key,value) VALUES ('offset',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),))

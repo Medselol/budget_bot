@@ -23,7 +23,7 @@ def permitted(api, db, chat, uid, owner, value, message):
             ledger.clear_draft(db, uid)
     if role == 'foreman' and (value.startswith(('new:transfer','/project ','/account '))):
         api.send(chat, 'Прораб записывает только приход и расход.'); return False
-    if value.startswith(('fund:', 'role:')) and not ledger.manager(db, uid, owner):
+    if value.startswith(('fund:', 'role:', 'participant:')) and not ledger.manager(db, uid, owner):
         api.send(chat, 'Недостаточно прав.'); return False
     # Existing forms must not allow a demoted user to save income or transfers.
     if role == 'foreman' and value.startswith(('op:edit:', 'op:delete:', 'op:delconfirm:')):
@@ -38,7 +38,7 @@ def permitted(api, db, chat, uid, owner, value, message):
 def role_picker(api, chat, target, owner):
     if target == owner:
         api.send(chat, 'Это владелец. Его права остаются неизменными.'); return
-    api.send(chat, 'Выбери права участника:', [(label, f'role:set:{target}:{role}') for role,label in ledger.ROLE_NAMES.items() if role != 'owner'])
+    api.send(chat, 'Выбери права участника:', [(label, f'role:set:{target}:{role}') for role,label in ledger.ROLE_NAMES.items() if role != 'owner'] + [('К участникам','users:list')])
 
 
 def show_users(api, db, chat, owner):
@@ -102,7 +102,7 @@ def callback(api, db, chat, uid, update_id, value, owner):
             with db:
                 cur=db.execute('UPDATE users SET role=? WHERE id=?',(parts[3],target))
                 db.execute('DELETE FROM drafts WHERE user_id=?',(target,))
-            api.send(chat, 'Права обновлены: '+ledger.ROLE_NAMES[parts[3]] if cur.rowcount else 'Пользователь не найден.', [('Меню','menu')])
+            api.send(chat, 'Права обновлены: '+ledger.ROLE_NAMES[parts[3]] if cur.rowcount else 'Пользователь не найден.', [('К участникам','users:list')])
         return True
     if value=='team:balances':
         if not ledger.reader(db,uid,owner): return True
