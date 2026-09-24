@@ -27,6 +27,8 @@ def init(db):
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     ''')
     db.commit()
+    import site_notifications
+    site_notifications.init(db)
 
 
 def role(db, uid, owner):
@@ -87,9 +89,13 @@ def transition(db,uid,owner,ident,version,action,note=''):
     with db:
         if action=='discard': db.execute('DELETE FROM site_reports WHERE id=? AND version=?',(ident,version))
         elif action=='submit':
-            db.execute("UPDATE site_reports SET status=?,submitted_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=? AND version=?",(target,ident,version))
+            cur=db.execute("UPDATE site_reports SET status=?,submitted_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=? AND version=?",(target,ident,version))
         else:
-            db.execute('UPDATE site_reports SET status=?,review_note=?,reviewer_id=?,reviewed_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=? AND version=?',(target,note.strip(),uid,ident,version))
+            cur=db.execute('UPDATE site_reports SET status=?,review_note=?,reviewer_id=?,reviewed_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=? AND version=?',(target,note.strip(),uid,ident,version))
+        if action!='discard':
+            if not cur.rowcount: raise ValueError('Отчёт изменился. Открой его заново.')
+            from site_notifications import enqueue
+            enqueue(db,ident,owner)
 
 
 def save_photo(db,uid,owner,ident,update_id,content,ext):
@@ -103,8 +109,26 @@ def save_photo(db,uid,owner,ident,update_id,content,ext):
         db.execute('UPDATE site_reports SET version=version+1 WHERE id=?',(ident,))
 
 
+
 def filters(db,uid):
     return (ledger.draft(db,uid) or {}).get('site_filters',{})
+
+
+def require_photo_removal(db,ident,uid,owner):
+    r=report(db,ident,uid,owner)
+    if not ledger.manager(db,uid,owner): report(db,ident,uid,owner,True)
+    return r
+
+
+def remove_photo(db,uid,owner,ident,photo_id,version):
+    with db:
+        db.execute('BEGIN IMMEDIATE')
+        r=require_photo_removal(db,ident,uid,owner)
+        if r['version']!=version: raise ValueError('Отчёт изменился. Открой его заново.')
+        cur=db.execute('DELETE FROM site_photos WHERE id=? AND report_id=?',(photo_id,ident))
+        if not cur.rowcount: raise ValueError('Фото уже удалено.')
+        db.execute('UPDATE site_reports SET version=version+1 WHERE id=?',(ident,))
+        db.execute("UPDATE site_notifications SET version=version+1 WHERE report_id=? AND version=? AND state='pending'",(ident,version))
 
 
 def state(db,uid,step,**extra):
@@ -256,12 +280,13 @@ def callback(api,db,chat,uid,update_id,value,owner):
             if not photo: raise ValueError('Фото больше нет.')
             api.document(chat,photo['filename'],photo['content'])
             opts=[('Все фото',f'site:photos:{ident}'),('К отчёту',f'site:view:{ident}')]
-            if r['user_id']==uid and r['status'] in ('draft','rework') and role(db,uid,owner)!='investor': opts += [('Убрать фото',f'site:remove:{ident}:{photo["id"]}:{r["version"]}')]
+            if ledger.manager(db,uid,owner) or (r['user_id']==uid and r['status'] in ('draft','rework') and role(db,uid,owner)!='investor'): opts += [('Удалить фото',f'site:remove:{ident}:{photo["id"]}:{r["version"]}')]
             api.send(chat,f'Фото к отчёту №{ident} · {r["work_date"]} · {r["stage"]}',opts)
         elif cmd in ('submit','discard','accept','rework','remove'):
             ident=int(p[2]);r=report(db,ident,uid,owner);version=int(p[4] if cmd=='remove' else p[3])
             if version!=r['version']: raise ValueError('Отчёт изменился. Открой его заново.')
-            if cmd in ('submit','discard','remove'): report(db,ident,uid,owner,True)
+            if cmd=='remove': require_photo_removal(db,ident,uid,owner)
+            elif cmd in ('submit','discard'): report(db,ident,uid,owner,True)
             elif not ledger.manager(db,uid,owner): raise ValueError('Недостаточно прав.')
             d=state(db,uid,'site_review' if cmd=='rework' else 'site_confirm',ident=ident,version=version,action=cmd,photo_id=int(p[3]) if cmd=='remove' else None)
             if cmd=='rework': api.send(chat,'Напиши, что прорабу нужно исправить (3–700 символов).',[('К отчёту',f'site:view:{ident}')])
@@ -270,11 +295,7 @@ def callback(api,db,chat,uid,update_id,value,owner):
             d=ledger.draft(db,uid) or {}
             if d.get('step')!='site_confirm' or d.get('nonce')!=p[2]: raise ValueError('Подтверждение устарело. Открой отчёт.')
             if d['action']=='remove':
-                r=report(db,d['ident'],uid,owner,True)
-                if r['version']!=d['version']: raise ValueError('Отчёт изменился.')
-                with db:
-                    db.execute('DELETE FROM site_photos WHERE id=? AND report_id=?',(d['photo_id'],d['ident']))
-                    db.execute('UPDATE site_reports SET version=version+1 WHERE id=?',(d['ident'],))
+                remove_photo(db,uid,owner,d['ident'],d['photo_id'],d['version'])
             else: transition(db,uid,owner,d['ident'],d['version'],d['action'],d.get('note',''))
             if d['action']=='discard': listing(api,db,chat,uid,owner)
             else: card(api,db,chat,uid,owner,d['ident'])

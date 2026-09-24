@@ -132,13 +132,15 @@ class Runtime:
 
     def _notifications(self):
         from request_notifications import deliver
+        from site_notifications import deliver as deliver_site
         db=connection(self.path)
         try:
             while not self.stop.is_set():
-                try: deliver(self.api,db,self.owner)
-                except Exception as exc:
-                    db.rollback()
-                    logging.error('Notification worker failed error=%s',type(exc).__name__)
+                for delivery in (deliver,deliver_site):
+                    try: delivery(self.api,db,self.owner)
+                    except Exception as exc:
+                        db.rollback()
+                        logging.error('Notification worker failed error=%s',type(exc).__name__)
                 if self.stop.wait(2): break
         finally: db.close()
 
