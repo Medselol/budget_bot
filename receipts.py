@@ -30,7 +30,7 @@ def card(api,db,chat,uid,owner,ident):
     if not allowed(db,uid,owner,row): api.send(chat,'Операция недоступна.');return
     status,reason,count=metadata(db,ident)
     api.send(chat,ledger.operation_text(db,row)+f'\nПроверка: {STATUS.get(status,status)}\nЧеков: {count}'+ ('\nБез чека: '+reason if reason else ''),
-        [('Посмотреть чеки',f'rc:files:{ident}')]+([('Добавить чеки',f'rc:add:{ident}'),('Нет чека — пояснить',f'rc:reason:{ident}')] if allowed(db,uid,owner,row,True) else [])+([('Проверено',f'rc:approve:{ident}'),('Вернуть на проверку',f'rc:pending:{ident}')] if ledger.manager(db,uid,owner) else [])+([('К проверке расходов','rc:list')] if ledger.manager(db,uid,owner) else [])+[('Меню','menu')])
+        [('Посмотреть чеки',f'rc:files:{ident}')]+([('Добавить чеки',f'rc:add:{ident}'),('Нет чека — пояснить',f'rc:reason:{ident}')] if allowed(db,uid,owner,row,True) else [])+([('Проверено',f'rc:approve:{ident}'),('Вернуть на проверку',f'rc:pending:{ident}')] if ledger.manager(db,uid,owner) else [])+([('Доставка уведомлений',f'ec:delivery:{ident}'),('К проверке расходов','rc:list')] if ledger.manager(db,uid,owner) else [])+[('Меню','menu')])
 
 def begin(api,db,chat,uid,ident):
     ledger.set_draft(db,uid,{'step':'receipt_upload','operation_id':ident})
@@ -101,8 +101,12 @@ def callback(api,db,chat,uid,value,owner):
             api.send(chat,'Прикрепи чек или укажи причину его отсутствия.', [('Нет чека — пояснить',f'rc:reason:{ident}')]);return True
         ledger.clear_draft(db,uid)
     elif action in ('approve','pending') and ledger.manager(db,uid,owner):
+        previous_status=metadata(db,ident)[0]
         with db:
             db.execute("INSERT INTO expense_reviews(operation_id,status,reviewer_id,reviewed_at) VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(operation_id) DO UPDATE SET status=excluded.status,reviewer_id=excluded.reviewer_id,reviewed_at=excluded.reviewed_at",(ident,'approved' if action=='approve' else 'pending',uid))
+            if action=='pending':
+                from expense_notifications import review_reopened
+                review_reopened(db,ident,previous_status)
     card(api,db,chat,uid,owner,ident);return True
 
 def message(api,db,chat,uid,text,owner):
@@ -122,8 +126,11 @@ def message(api,db,chat,uid,text,owner):
     ident=d['operation_id']
     if not allowed(db,uid,owner,row_for(db,ident),True): return True
     if len(text.strip())<3: api.send(chat,'Напиши пояснение подробнее.');return True
+    previous_status=metadata(db,ident)[0]
     with db:
         db.execute("INSERT INTO expense_reviews(operation_id,status,reason) VALUES (?,'pending',?) ON CONFLICT(operation_id) DO UPDATE SET reason=excluded.reason,status='pending',reviewer_id=NULL,reviewed_at=NULL",(ident,text[:1000]))
+        from expense_notifications import review_reopened
+        review_reopened(db,ident,previous_status)
     ledger.clear_draft(db,uid);card(api,db,chat,uid,owner,ident);return True
 
 def media(api,db,chat,uid,payload,update_id,owner):
@@ -144,9 +151,12 @@ def media(api,db,chat,uid,payload,update_id,owner):
     with urllib.request.urlopen(url,timeout=60) as response: content=response.read(LIMIT+1)
     valid=(ext=='.pdf' and content.startswith(b'%PDF-')) or (ext=='.jpg' and content.startswith(b'\xff\xd8')) or (ext=='.png' and content.startswith(b'\x89PNG\r\n\x1a\n'))
     if len(content)>LIMIT or not valid: api.send(chat,'Файл не подходит. Пришли фото или PDF до 10 МБ.');return
+    previous_status=metadata(db,ident)[0]
     with db:
         db.execute('INSERT INTO receipts(operation_id,update_id,uploader_id,file_id,filename,content) VALUES (?,?,?,?,?,?)',(ident,update_id,uid,f['file_id'],f'check_{ident}_{update_id}{ext}',content))
         db.execute("INSERT INTO expense_reviews(operation_id) VALUES (?) ON CONFLICT(operation_id) DO UPDATE SET status='pending',reason='',reviewer_id=NULL,reviewed_at=NULL",(ident,))
+        from expense_notifications import review_reopened
+        review_reopened(db,ident,previous_status)
     api.send(chat,'Чек сохранён. Можно прислать следующий.', [('Готово',f'rc:done:{ident}')])
 
 def enrich(api,db,rows):

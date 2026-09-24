@@ -20,13 +20,16 @@ def init(db):
       next_attempt REAL NOT NULL DEFAULT 0, PRIMARY KEY(event_id,recipient));
     CREATE INDEX IF NOT EXISTS expense_alert_latest ON expense_alert_events(operation_id,id);
     ''')
+    if 'detail' not in {r['name'] for r in db.execute('PRAGMA table_info(expense_alert_deliveries)')}:
+        db.execute("ALTER TABLE expense_alert_deliveries ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
+    db.commit()
 
 
-def changed(db, ident):
+def changed(db, ident, *, reset_review=True):
     """Called in the transaction saving the expense. No network calls."""
     r=db.execute("SELECT o.*,u.role FROM operations o JOIN users u ON u.id=o.user_id WHERE o.id=? AND o.kind='expense'",(ident,)).fetchone()
     if not r: return
-    db.execute("INSERT INTO expense_reviews(operation_id) VALUES (?) ON CONFLICT(operation_id) DO UPDATE SET status='pending',reviewer_id=NULL,reviewed_at=NULL",(ident,))
+    if reset_review: db.execute("INSERT INTO expense_reviews(operation_id) VALUES (?) ON CONFLICT(operation_id) DO UPDATE SET status='pending',reviewer_id=NULL,reviewed_at=NULL",(ident,))
     if r['role']!='foreman': return
     event=db.execute('INSERT INTO expense_alert_events(operation_id) VALUES (?)',(ident,)).lastrowid
     db.execute("INSERT INTO expense_alert_deliveries(event_id,recipient) SELECT ?,id FROM users WHERE active=1 AND deleted=0 AND role IN ('owner','editor')",(event,))
@@ -37,11 +40,25 @@ def settings(db, uid):
     return dict(r) if r else dict(enabled=1,min_uah=0,min_usd=0,foreman_id=0,missing_only=0)
 
 
-def matches(db, uid, row):
+def exclusion(db, uid, row):
     s=settings(db,uid)
-    return (s['enabled'] and row['amount_kop']>=s['min_'+row['currency'].lower()]
-            and (not s['foreman_id'] or s['foreman_id']==row['user_id'])
-            and (not s['missing_only'] or not db.execute('SELECT 1 FROM receipts WHERE operation_id=?',(row['id'],)).fetchone()))
+    if not s['enabled']: return 'disabled'
+    if row['amount_kop']<s['min_'+row['currency'].lower()]: return 'minimum'
+    if s['foreman_id'] and s['foreman_id']!=row['user_id']: return 'person'
+    if s['missing_only'] and db.execute('SELECT 1 FROM receipts WHERE operation_id=?',(row['id'],)).fetchone(): return 'has_receipt'
+    return ''
+
+
+def matches(db,uid,row):
+    return not exclusion(db,uid,row)
+
+
+def review_reopened(db,ident,previous_status):
+    # Runs in the receipt/review transaction. Existing pending expenses do not
+    # generate one alert for every uploaded page of a receipt.
+    existing=db.execute('SELECT 1 FROM expense_alert_events WHERE operation_id=?',(ident,)).fetchone()
+    if previous_status=='approved' or not existing:
+        changed(db,ident,reset_review=False)
 
 
 def deliver(api, db, owner, now=None):
@@ -52,9 +69,11 @@ def deliver(api, db, owner, now=None):
         row=db.execute("SELECT o.*,u.name FROM operations o LEFT JOIN users u ON u.id=o.user_id WHERE o.id=? AND o.kind='expense'",(ident,)).fetchone()
         from receipts import metadata
         latest=db.execute('SELECT MAX(id) FROM expense_alert_events WHERE operation_id=?',(ident,)).fetchone()[0]
-        if (not row or not ledger.manager(db,uid,owner) or latest!=job['event_id']
-                or metadata(db,ident)[0]=='approved' or not matches(db,uid,row)):
-            with db: db.execute("UPDATE expense_alert_deliveries SET state='skipped' WHERE event_id=? AND recipient=?",key)
+        reason=('deleted' if not row else 'access' if not ledger.manager(db,uid,owner)
+                else 'superseded' if latest!=job['event_id'] else 'approved' if metadata(db,ident)[0]=='approved'
+                else exclusion(db,uid,row))
+        if reason:
+            with db: db.execute("UPDATE expense_alert_deliveries SET state='skipped',detail=? WHERE event_id=? AND recipient=?",(reason,*key))
             continue
         status,reason,count=metadata(db,ident)
         text=(f"🧾 Расход прораба — требует проверки\n{row['name'] or row['user_id']}\n"
@@ -66,9 +85,9 @@ def deliver(api, db, owner, now=None):
         except Exception as exc:
             logging.warning('Expense notification failed event=%s error=%s',job['event_id'],type(exc).__name__)
             attempts=job['attempts']+1
-            with db: db.execute('UPDATE expense_alert_deliveries SET attempts=?,next_attempt=?,state=? WHERE event_id=? AND recipient=?',(attempts,now+min(3600,30*2**min(attempts-1,7)),'failed' if attempts>=12 else 'pending',*key))
+            with db: db.execute('UPDATE expense_alert_deliveries SET attempts=?,next_attempt=?,state=?,detail=? WHERE event_id=? AND recipient=?',(attempts,now+min(3600,30*2**min(attempts-1,7)),'failed' if attempts>=12 else 'pending','telegram_'+str(getattr(exc,'code','error')),*key))
         else:
-            with db: db.execute("UPDATE expense_alert_deliveries SET state='sent' WHERE event_id=? AND recipient=?",key)
+            with db: db.execute("UPDATE expense_alert_deliveries SET state='sent',detail='' WHERE event_id=? AND recipient=?",key)
 
 
 def show(api,db,chat,uid):
@@ -89,6 +108,12 @@ def show(api,db,chat,uid):
 def callback(api,db,chat,uid,value,owner):
     if not value.startswith('ec:'): return False
     if chat!=uid or not ledger.manager(db,uid,owner): return True
+    if value.startswith(('ec:delivery:','ec:retry:')):
+        try: ident=int(value.rsplit(':',1)[1])
+        except ValueError: return True
+        if value.startswith('ec:retry:'): retry(db,ident)
+        delivery_status(api,db,chat,ident)
+        return True
     if value.startswith('ec:people:'):
         try: page=max(0,int(value.rsplit(':',1)[1]))
         except ValueError: return True
@@ -131,3 +156,56 @@ def message(api,db,chat,uid,text,owner):
         db.execute('INSERT OR IGNORE INTO expense_alert_settings(user_id) VALUES (?)',(uid,))
         db.execute(f'UPDATE expense_alert_settings SET {field}=? WHERE user_id=?',(amount,uid))
     ledger.clear_draft(db,uid);show(api,db,chat,uid);return True
+
+
+DETAILS={'disabled':'уведомления выключены','minimum':'сумма ниже заданного минимума',
+         'person':'в настройках выбран другой прораб','has_receipt':'включён фильтр «только без чеков»',
+         'deleted':'операция удалена','access':'права администратора закрыты',
+         'superseded':'расход изменился, создано новое уведомление','approved':'расход уже проверен',
+         'telegram_403':'Telegram отказал в доступе к чату — проверь блокировку бота',
+         'telegram_400':'Telegram отклонил сообщение — проверь, что администратор нажал /start',
+         'telegram_429':'ограничение частоты Telegram; будет повтор',
+         'telegram_error':'ошибка соединения с Telegram'}
+
+
+def retry(db,ident):
+    from receipts import row_for,metadata
+    row=row_for(db,ident)
+    if not row or metadata(db,ident)[0]=='approved': return
+    with db:
+        event=db.execute('SELECT MAX(id) FROM expense_alert_events WHERE operation_id=?',(ident,)).fetchone()[0]
+        if event is None:
+            changed(db,ident,reset_review=False)
+            event=db.execute('SELECT MAX(id) FROM expense_alert_events WHERE operation_id=?',(ident,)).fetchone()[0]
+        if event is None: return
+        # Include newly appointed managers, but never re-send a confirmed delivery.
+        db.execute("INSERT OR IGNORE INTO expense_alert_deliveries(event_id,recipient) SELECT ?,id FROM users WHERE active=1 AND deleted=0 AND role IN ('owner','editor')",(event,))
+        db.execute("UPDATE expense_alert_deliveries SET state='pending',attempts=0,next_attempt=0,detail='' WHERE event_id=? AND state IN ('failed','skipped')",(event,))
+
+
+def delivery_status(api,db,chat,ident):
+    from receipts import row_for,metadata
+    row=row_for(db,ident)
+    if not row: api.send(chat,'Расход недоступен.');return
+    author=db.execute('SELECT name,role FROM users WHERE id=?',(row['user_id'],)).fetchone()
+    text=f"Доставка уведомлений · расход №{ident}\nАвтор: {author['name'] if author else row['user_id']}"
+    if author: text+=' · '+ledger.ROLE_NAMES.get(author['role'],author['role'])
+    heartbeat=db.execute("SELECT value FROM settings WHERE key='notification_heartbeat'").fetchone()
+    if not heartbeat or time.time()-float(heartbeat[0])>120:
+        text+='\nФоновая отправка пока не подтверждена. Если статус сохраняется, нужны Deploy Logs Railway.'
+    event=db.execute('SELECT MAX(id) FROM expense_alert_events WHERE operation_id=?',(ident,)).fetchone()[0]
+    if event is None:
+        text+=('\nАвтоуведомления предназначены для расходов прорабов.' if author and author['role']!='foreman'
+               else '\nУведомление не было поставлено в очередь. Можно отправить его сейчас.')
+    else:
+        rows=db.execute('SELECT d.*,u.name FROM expense_alert_deliveries d LEFT JOIN users u ON u.id=d.recipient WHERE event_id=? ORDER BY recipient',(event,)).fetchall()
+        if not rows: text+='\nНа момент сохранения не было активных администраторов.'
+        labels={'pending':'В очереди','sent':'Отправлено в Telegram','skipped':'Пропущено','failed':'Ошибка доставки'}
+        for r in rows:
+            text+=f"\n{r['name'] or r['recipient']}: {labels.get(r['state'],r['state'])}"
+            if r['detail']: text+=' — '+DETAILS.get(r['detail'],'ошибка Telegram')
+            if r['attempts']: text+=f" · попыток: {r['attempts']}"
+    opts=[('Обновить статус',f'ec:delivery:{ident}')]
+    if metadata(db,ident)[0]!='approved' and (event is not None or (author and author['role']=='foreman')):
+        opts.append(('Повторить недоставленные',f'ec:retry:{ident}'))
+    api.send(chat,text,opts+[('К расходу',f'rc:view:{ident}'),('Настройки','ec:settings'),('Главное меню','menu')])

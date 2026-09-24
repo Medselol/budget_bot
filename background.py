@@ -141,6 +141,11 @@ class Runtime:
         db=connection(self.path)
         try:
             while not self.stop.is_set():
+                try:
+                    with db: db.execute("INSERT INTO settings(key,value) VALUES ('notification_heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(time.time()),))
+                except Exception as exc:
+                    db.rollback()
+                    logging.error('Notification heartbeat failed error=%s',type(exc).__name__)
                 for delivery in (deliver,deliver_site,deliver_expense):
                     try: delivery(self.api,db,self.owner)
                     except Exception as exc:
