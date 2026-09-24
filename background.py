@@ -51,6 +51,10 @@ class GuardedAPI:
         self.check()
         if chat != self.uid: raise AccessChanged()
         return self.api.document(chat,name,content)
+    def album(self, chat, photos, caption):
+        self.check()
+        if chat != self.uid: raise AccessChanged()
+        return self.api.album(chat,photos,caption)
     def call(self, method, payload):
         self.check()
         return self.api.call(method,payload)

@@ -30,7 +30,8 @@ class PhotoNotificationTests(unittest.TestCase):
         msg=next(m for m in self.api.messages if m[0]==789)
         self.assertIn(('Смотреть фотографии',f'site:photos:{ident}'),msg[2])
         self.cb(f'site:photos:{ident}',789)
-        self.assertTrue(any(v.startswith('site:photo:') for _,v in self.api.messages[-1][2]))
+        self.assertEqual(len(self.api.albums),1)
+        self.assertFalse(any(v.startswith('site:photo:') for _,v in self.api.messages[-1][2]))
 
     def test_rework_only_to_author_and_resubmission(self):
         ident=self.ready();self.submit(ident)

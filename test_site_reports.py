@@ -15,7 +15,8 @@ from participants import purge
 
 class API:
     url='https://api.telegram.org/botTEST/'
-    def __init__(self): self.messages=[];self.files=[]
+    def __init__(self): self.messages=[];self.files=[];self.albums=[]
+    def album(self,chat,photos,caption): self.albums.append((chat,photos,caption))
     def send(self,chat,text,options=None): self.messages.append((chat,text,options or []))
     def document(self,chat,name,content): self.files.append((chat,name,content))
     def call(self,method,payload): return {'file_path':'photos/test.jpg'}

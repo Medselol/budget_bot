@@ -351,6 +351,12 @@ class Telegram:
         with measure('telegram_document'):
             return self._document(chat, name, content)
 
+    def album(self, chat, photos, caption):
+        from telegram_album import send
+        from background import measure
+        with measure('telegram_album'):
+            return send(self.url, chat, photos, caption)
+
     def _document(self, chat, name, content):
         mime = {".pdf":"application/pdf", ".jpg":"image/jpeg", ".png":"image/png", ".zip":"application/zip"}.get(Path(name).suffix.lower(), "text/csv")
         boundary = "----buildledger" + str(int(time.time() * 1000))

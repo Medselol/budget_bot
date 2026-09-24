@@ -166,6 +166,19 @@ def home(api,db,chat,uid,owner):
     api.send(chat,'Фотоотчёты стройки\nЭтап, дата работ, фотографии и замечания.\nЧужие черновики скрыты в общем журнале. Для нескольких этапов создай отдельные отчёты.',opts)
 
 
+def send_album(api,db,chat,uid,owner,ident):
+    r=report(db,ident,uid,owner)
+    from background import defer
+    if defer(api,db,chat,'photo_album',lambda worker,conn:send_album(worker,conn,chat,uid,owner,ident)): return
+    photos=db.execute('SELECT filename,content FROM site_photos WHERE report_id=? ORDER BY id',(ident,)).fetchall()
+    opts=[('К отчёту',f'site:view:{ident}')]
+    if not photos:
+        api.send(chat,'В этом альбоме пока нет фотографий.',opts);return
+    caption=f"Фотоотчёт №{ident} · {r['work_date']}\n{r['stage']} · {r['author']}\n{r['area']}"
+    api.album(chat,[(p['filename'],p['content']) for p in photos],caption)
+    api.send(chat,f'Альбом №{ident} · {len(photos)} фото.',opts)
+
+
 def card(api,db,chat,uid,owner,ident):
     r=report(db,ident,uid,owner)
     state(db,uid,'site_card',ident=ident)
@@ -256,7 +269,7 @@ def callback(api,db,chat,uid,update_id,value,owner):
             if not ledger.manager(db,uid,owner): raise ValueError('Недостаточно прав.')
             r=editable(db,ident,uid,owner)
             opts=[(label,f'site:edit:{ident}:{field}') for field,label in FIELDS.items()]
-            opts += [('Добавить фотографии',f'site:upload:{ident}'),('Просмотр / удаление фото',f'site:photos:{ident}'),('К отчёту',f'site:view:{ident}')]
+            opts += [('Добавить фотографии',f'site:upload:{ident}'),('Просмотр / удаление фото',f'site:photomanage:{ident}'),('К отчёту',f'site:view:{ident}')]
             api.send(chat,f'Редактирование альбома №{ident}. Выбери поле или фотографии. Изменения сохраняются сразу, автор и статус отчёта сохраняются.',opts)
         elif cmd=='deletealbum':
             ident=int(p[2]);version=int(p[3])
@@ -308,7 +321,10 @@ def callback(api,db,chat,uid,update_id,value,owner):
             ident=int(p[2]);editable(db,ident,uid,owner);state(db,uid,'site_upload',ident=ident)
             api.send(chat,'Пришли фотографии по одной или альбомом. До 10 фото в отчёте, каждое до 10 МБ; JPG / PNG. Затем нажми «Готово».',[('Готово',f'site:view:{ident}')])
         elif cmd=='photos':
+            send_album(api,db,chat,uid,owner,int(p[2]))
+        elif cmd=='photomanage':
             ident=int(p[2]);r=report(db,ident,uid,owner)
+            require_photo_removal(db,ident,uid,owner)
             photos=db.execute('SELECT id,filename FROM site_photos WHERE report_id=? ORDER BY id',(ident,)).fetchall()
             api.send(chat,f'Фото отчёта №{ident}: {len(photos)}. Выбери фотографию.',[(f'Фото {i+1}',f'site:photo:{r["id"]}:{x["id"]}') for i,x in enumerate(photos)]+[('К отчёту',f'site:view:{ident}')])
         elif cmd=='photo':
