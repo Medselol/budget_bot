@@ -101,6 +101,9 @@ def connect(path, owner_id=0, initial_users=()):
     if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         for uid in (owner_id, *initial_users):
             db.execute("INSERT OR IGNORE INTO users(id,name) VALUES (?,?)", (uid, "Денис" if uid == owner_id else f"Участник {uid}"))
+    if "role" not in {r["name"] for r in db.execute("PRAGMA table_info(users)")}:
+        db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
+    db.execute("UPDATE users SET role='owner',active=1 WHERE id=?", (owner_id,))
     # Keep the owner's display name aligned with the configured owner account.
     db.execute("UPDATE users SET name='Денис' WHERE id=?", (owner_id,))
     for name in ("Наличные", "Карта", "Счёт"):
@@ -208,7 +211,7 @@ def rows_for(db, start=None, end=None, project_id=None, user_id=None):
         LEFT JOIN users u ON u.id=o.user_id WHERE 1=1"""
     args = []
     if user_id is not None:
-        sql += " AND o.user_id=?"; args.append(user_id)
+        sql += " AND (o.user_id=? OR (o.kind='transfer' AND (af.owner_id=? OR at.owner_id=?)))"; args.extend([user_id]*3)
     if start:
         sql += " AND o.occurred_on>=?"; args.append(start)
     if end:
@@ -246,8 +249,8 @@ def balances(db, user_id=0):
         amount = row["amount_kop"]
         currency = row["currency"]
         if row["kind"] == "transfer":
-            result[row["from_account_id"]][1][currency] -= amount
-            result[row["to_account_id"]][1][currency] += amount
+            if row["from_account_id"] in result: result[row["from_account_id"]][1][currency] -= amount
+            if row["to_account_id"] in result: result[row["to_account_id"]][1][currency] += amount
         elif row["kind"] == "income":
             result[row["account_id"]][1][currency] += amount
         else:
@@ -300,10 +303,11 @@ class Telegram:
         self.call("sendMessage", payload)
 
     def document(self, chat, name, content):
+        mime = "application/pdf" if name.lower().endswith(".pdf") else "text/csv"
         boundary = "----buildledger" + str(int(time.time() * 1000))
         data = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{name}\"\r\nContent-Type: text/csv\r\n\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
         ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
         request = urllib.request.Request(self.url + "sendDocument", data=data, headers={"Content-Type": "multipart/form-data; boundary=" + boundary})
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -312,14 +316,39 @@ class Telegram:
             raise RuntimeError(result.get("description", "Telegram upload error"))
 
 
-def menu(bot, chat, is_owner=False):
-    options = [("Расход", "new:expense"), ("Приход", "new:income"), ("Перевод", "new:transfer"), ("Операции", "ops:list"), ("Мой отчёт", "report:menu"), ("Мои остатки", "balance")]
-    if is_owner:
-        options.extend([("Общий отчёт", "all:menu"), ("Пользователи", "users:list")])
+ROLE_NAMES = {"owner": "Владелец", "editor": "Главный редактор", "foreman": "Прораб", "investor": "Инвестор", "member": "Участник"}
+
+
+def role_for(db, uid, owner_id=0):
+    row = db.execute("SELECT role,active FROM users WHERE id=?", (uid,)).fetchone()
+    if not row or not row["active"]: return None
+    return "owner" if uid == owner_id else row["role"]
+
+
+def manager(db, uid, owner_id=0):
+    return role_for(db, uid, owner_id) in ("owner", "editor")
+
+
+def reader(db, uid, owner_id=0):
+    return role_for(db, uid, owner_id) in ("owner", "editor", "investor")
+
+
+def menu(bot, chat, is_owner=False, role=None):
+    role = role or ("owner" if is_owner else "member")
+    options = []
+    if role != "investor":
+        options = [("Расход", "new:expense")]
+        if role != "foreman": options += [("Приход", "new:income"), ("Перевод", "new:transfer")]
+        options += [("Операции", "ops:list"), ("Мой отчёт PDF", "report:menu"), ("Мои остатки", "balance")]
+    if role in ("owner", "editor", "investor"):
+        options += [("Общий отчёт PDF", "all:menu")]
+    if role in ("owner", "editor"):
+        options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu"), ("Балансы участников", "team:balances")]
     bot.send(chat, "Учёт стройки. Выбери действие:", options)
 
 
 def prompt(bot, db, chat, d, uid=0):
+    uid = d.get("ledger_user_id", uid)
     step = d["step"]
     if step == "project":
         options = [(r["name"], f"proj:{r['id']}") for r in names(db, "projects", uid)]
@@ -363,7 +392,10 @@ def description(db, d, uid=0):
         line.append("Источник: " + d["source"])
     for key, label in (("account_id", "Счёт"), ("from_account_id", "Откуда"), ("to_account_id", "Куда")):
         if key in d:
-            r = db.execute("SELECT name FROM accounts WHERE id=? AND owner_id=?", (d[key], uid)).fetchone()
+            if d["kind"] == "transfer":
+                r = db.execute("SELECT u.name || ' · ' || a.name FROM accounts a JOIN users u ON u.id=a.owner_id WHERE a.id=?", (d[key],)).fetchone()
+            else:
+                r = db.execute("SELECT name FROM accounts WHERE id=? AND owner_id=?", (d[key], uid)).fetchone()
             line.append(label + ": " + (r[0] if r else "Недоступен"))
     if d.get("comment"):
         line.append("Комментарий: " + d["comment"])
@@ -413,6 +445,9 @@ def report_text(db, start, end, pid, user_id=None):
 def show_report(bot, db, chat, start, end, pid, user_id=None):
     txt, rows, name = report_text(db, start, end, pid, user_id)
     csv_button = f"csvall:{start or '0'}:{end or '0'}" if user_id is None else f"csv:{start or '0'}:{end or '0'}:{pid or 0}"
+    from pdf_report import pdf_report
+    scope = "Общий отчёт" if user_id is None else "Личный отчёт"
+    bot.document(chat, "stroika_report.pdf", pdf_report(rows, start, end, DEFAULT_PROJECT_NAME if name == "Все объекты" else name, scope))
     bot.send(chat, txt[:4000] + ("\n…" if len(txt) > 4000 else ""), [("Скачать CSV для Excel", csv_button), ("Меню", "menu")])
 
 
@@ -428,11 +463,11 @@ def show_operations(bot, db, chat, user_id):
     bot.send(chat, "Последние операции. Выбери запись для просмотра, изменения или удаления:", options)
 
 
-def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
+def _handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     d = draft(db, uid)
-    if value == "menu": menu(bot, chat, uid == owner_id); return
+    if value == "menu": menu(bot, chat, role=role_for(db, uid, owner_id)); return
     if value == "cancel":
-        clear_draft(db, uid); bot.send(chat, "Отменено."); menu(bot, chat, uid == owner_id); return
+        clear_draft(db, uid); bot.send(chat, "Отменено."); menu(bot, chat, role=role_for(db, uid, owner_id)); return
     if value.startswith("new:"):
         kind = value.split(":")[1]
         if kind not in ("income", "expense", "transfer"): return
@@ -441,17 +476,23 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
             d["project_id"] = default_project_id(db, uid)
         set_draft(db, uid, d); prompt(bot, db, chat, d, uid); return
     if value == "ops:list":
-        show_operations(bot, db, chat, uid); return
+        show_operations(bot, db, chat, None if manager(db, uid, owner_id) else uid); return
     if value.startswith(("op:view:", "op:edit:", "op:delete:", "op:delconfirm:")):
         try:
             action, _, raw_id = value.split(":", 2)
             if action != "op" or not raw_id.isdigit(): return
             operation_id = int(raw_id)
-            row = operation_row(db, operation_id, uid)
+            row = operation_row(db, operation_id, None if manager(db, uid, owner_id) else uid)
         except (ValueError, TypeError):
             return
         if row is None:
             bot.send(chat, "Операция не найдена в твоём учёте.", [("К списку", "ops:list"), ("Меню", "menu")]); return
+        if row["user_id"] != uid and not manager(db, uid, owner_id) and not value.startswith("op:view:"):
+            bot.send(chat, "Выдачу денег может менять только редактор."); return
+        if row["kind"] == "transfer" and row["from_account_id"] and row["to_account_id"]:
+            owners = {r[0] for r in db.execute("SELECT owner_id FROM accounts WHERE id IN (?,?)", (row["from_account_id"], row["to_account_id"]))}
+            if len(owners) > 1:
+                bot.send(chat, operation_text(db, row) + "\nВыдача денег сохранена. Возврат оформляет редактор обратным переводом через «Выдать деньги».", [("Меню", "menu")]); return
         action = value.split(":", 2)[1]
         if action == "view":
             bot.send(chat, operation_text(db, row), [("Редактировать", f"op:edit:{operation_id}"),
@@ -459,8 +500,9 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
                                                      ("К списку", "ops:list")]); return
         if action == "edit":
             edit_draft = {"kind": row["kind"], "step": "from_account" if row["kind"] == "transfer" else ("stage" if row["kind"] == "expense" else "source"), "edit_id": operation_id}
+            edit_draft["ledger_user_id"] = row["user_id"]
             if row["kind"] != "transfer":
-                edit_draft["project_id"] = row["project_id"] or default_project_id(db, uid)
+                edit_draft["project_id"] = row["project_id"] or default_project_id(db, row["user_id"])
             set_draft(db, uid, edit_draft)
             bot.send(chat, f"Редактирование операции №{operation_id}. Пройди форму заново и подтверди сохранение; текущая запись изменится на месте.")
             prompt(bot, db, chat, edit_draft, uid); return
@@ -469,31 +511,32 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
                      [("Да, удалить", f"op:delconfirm:{operation_id}"), ("Назад", f"op:view:{operation_id}")]); return
         if action == "delconfirm":
             with db:
-                cursor = db.execute("DELETE FROM operations WHERE id=? AND user_id=?", (operation_id, uid))
+                cursor = db.execute("DELETE FROM operations WHERE id=? AND user_id=?", (operation_id, row["user_id"]))
                 if cursor.rowcount:
                     bump_revision(db)
             if cursor.rowcount:
                 bot.send(chat, f"Операция №{operation_id} удалена. Отчёты и таблица обновятся.")
             else:
                 bot.send(chat, "Операция уже удалена или не найдена.")
-            show_operations(bot, db, chat, uid); return
+            show_operations(bot, db, chat, None if manager(db, uid, owner_id) else uid); return
     if value == "balance":
         b = balances(db, uid)
         bot.send(chat, "Остатки по кассам (с начала учёта):\n" + "\n".join(f"{x[0]}: {money(x[1]['UAH'], 'UAH')}; {money(x[1]['USD'], 'USD')}" for x in b.values()), [("Меню", "menu")]); return
     if value == "report:menu":
         bot.send(chat, "Выбери период. Свой период: /report ГГГГ-ММ-ДД ГГГГ-ММ-ДД", [("Текущий месяц", "rp:month"), ("Весь период", "rp:all")]); return
-    if value == "users:list" and uid == owner_id:
-        users = db.execute("SELECT id,name,active FROM users ORDER BY id").fetchall()
-        bot.send(chat, "Пользователи:\n" + "\n".join(f"{r['name']} — {r['id']}" + (" (отключён)" if not r['active'] else "") for r in users) + "\n\nДобавить: /adduser ID Имя\nПереименовать: /renameuser ID Имя\nОтключить: /removeuser ID"); return
-    if value == "all:menu" and uid == owner_id:
+    if value == "users:list" and manager(db, uid, owner_id):
+        from access import show_users
+        show_users(bot, db, chat, owner_id); return
+    if value == "all:menu" and reader(db, uid, owner_id):
         bot.send(chat, "Общий отчёт всех пользователей:", [("Текущий месяц", "all:month"), ("Весь период", "all:all")]); return
-    if value in ("all:month", "all:all") and uid == owner_id:
+    if value in ("all:month", "all:all") and reader(db, uid, owner_id):
         today = datetime.now(TZ).date().isoformat()
         show_report(bot, db, chat, today[:7] + "-01" if value == "all:month" else None, today, None, None); return
     if value.startswith("rp:"):
         period = value.split(":")[1]
         if period not in ("month", "all"): return
-        bot.send(chat, "Выбери объект:", [("Все объекты", f"rproj:{period}:0")] + [(r["name"], f"rproj:{period}:{r['id']}") for r in names(db, "projects", uid)]); return
+        today = datetime.now(TZ).date().isoformat()
+        show_report(bot, db, chat, today[:7]+"-01" if period == "month" else None, today, None, uid); return
     if value.startswith("rproj:"):
         _, period, sid = value.split(":")
         if period not in ("month", "all") or not sid.isdigit(): return
@@ -506,7 +549,7 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
         try:
             parts = value.split(":")
             aggregate = parts[0] == "csvall"
-            if aggregate and uid != owner_id: return
+            if aggregate and not reader(db, uid, owner_id): return
             start, end = parts[1:3]
             start = valid_date(start) if start != "0" else None
             end = valid_date(end) if end != "0" else None
@@ -518,6 +561,7 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
         bot.document(chat, "stroika_report.csv", csv_report(rows, start, end, name)); return
     if not d:
         bot.send(chat, "Это действие уже завершено. Начни новую запись через /start."); return
+    ledger_uid = d.get("ledger_user_id", uid)
     step = d["step"]
     try:
         if value.startswith("proj:") and step == "project":
@@ -532,7 +576,7 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
             d["source"] = SOURCES[int(value.split(":")[1])]
         elif value.startswith("acct:") and step in ("account", "from_account", "to_account"):
             aid = int(value.split(":")[1])
-            if not db.execute("SELECT 1 FROM accounts WHERE id=? AND owner_id=?", (aid, uid)).fetchone(): return
+            if not db.execute("SELECT 1 FROM accounts WHERE id=? AND owner_id=?", (aid, ledger_uid)).fetchone(): return
             if step == "to_account" and aid == d.get("from_account_id"):
                 bot.send(chat, "Выбери другой счёт."); return
             d[{"account": "account_id", "from_account": "from_account_id", "to_account": "to_account_id"}[step]] = aid
@@ -549,12 +593,12 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
         elif value == "save" and step == "confirm":
             if d.get("edit_id"):
                 ident = d["edit_id"]
-                update_operation(db, d, ident, uid)
+                update_operation(db, d, ident, ledger_uid)
                 clear_draft(db, uid); bot.send(chat, f"Операция №{ident} изменена.")
             else:
                 ident = record(db, d, update_id, uid)
                 clear_draft(db, uid); bot.send(chat, f"Сохранено. Операция №{ident}.")
-            menu(bot, chat, uid == owner_id); return
+            menu(bot, chat, role=role_for(db, uid, owner_id)); return
         else:
             bot.send(chat, "Кнопка устарела. Продолжи текущий шаг:"); prompt(bot, db, chat, d, uid); return
     except (ValueError, IndexError, KeyError):
@@ -562,34 +606,40 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     advance(bot, db, chat, uid, d)
 
 
-def handle_message(bot, db, chat, uid, text, owner_id=0):
+def _handle_message(bot, db, chat, uid, text, owner_id=0):
     if text.startswith(("/start", "/menu", "/help")):
-        menu(bot, chat, uid == owner_id); return
+        menu(bot, chat, role=role_for(db, uid, owner_id)); return
     if text.startswith("/cancel"):
-        clear_draft(db, uid); bot.send(chat, "Отменено."); menu(bot, chat, uid == owner_id); return
-    if text.startswith("/adduser ") and uid == owner_id:
+        clear_draft(db, uid); bot.send(chat, "Отменено."); menu(bot, chat, role=role_for(db, uid, owner_id)); return
+    if text.startswith("/adduser ") and manager(db, uid, owner_id):
         match = re.fullmatch(r"/adduser\s+(\d{3,20})\s+([^\n]{1,80})", text)
         if not match or int(match[1]) >= 2**63:
             bot.send(chat, "Формат: /adduser 123456789 Имя"); return
         new_id, name = int(match[1]), match[2].strip()
+        if new_id == owner_id and uid != owner_id:
+            bot.send(chat, "Владельца может менять только он сам."); return
         if not name:
             bot.send(chat, "Укажи имя."); return
         with db:
             db.execute("INSERT INTO users(id,name,active) VALUES (?,?,1) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1", (new_id, name))
             for account in ("Наличные", "Карта", "Счёт"):
                 db.execute("INSERT OR IGNORE INTO accounts(owner_id,name) VALUES (?,?)", (new_id, account))
+        from access import role_picker
+        role_picker(bot, chat, new_id, owner_id)
         bot.send(chat, f"Добавлен: {name} (ID {new_id}). Пусть напишет боту /start."); return
-    if text.startswith("/renameuser ") and uid == owner_id:
+    if text.startswith("/renameuser ") and manager(db, uid, owner_id):
         match = re.fullmatch(r"/renameuser\s+(\d{3,20})\s+([^\n]{1,80})", text)
         if not match or int(match[1]) >= 2**63:
             bot.send(chat, "Формат: /renameuser 123456789 Имя"); return
         target, name = int(match[1]), match[2].strip()
+        if target == owner_id and uid != owner_id:
+            bot.send(chat, "Владельца может менять только он сам."); return
         if not name:
             bot.send(chat, "Укажи имя."); return
         with db:
             changed = db.execute("UPDATE users SET name=? WHERE id=?", (name, target)).rowcount
         bot.send(chat, f"Имя обновлено: {name}." if changed else "Пользователь не найден."); return
-    if text.startswith("/removeuser ") and uid == owner_id:
+    if text.startswith("/removeuser ") and manager(db, uid, owner_id):
         match = re.fullmatch(r"/removeuser\s+(\d{3,20})", text)
         if not match or int(match[1]) >= 2**63 or int(match[1]) == owner_id:
             bot.send(chat, "Формат: /removeuser 123456789 (владельца отключить нельзя)"); return
@@ -597,11 +647,11 @@ def handle_message(bot, db, chat, uid, text, owner_id=0):
             changed = db.execute("UPDATE users SET active=0 WHERE id=?", (int(match[1]),)).rowcount
             db.execute("DELETE FROM drafts WHERE user_id=?", (int(match[1]),))
         bot.send(chat, "Доступ отключён. Старые записи сохранены." if changed else "Пользователь не найден."); return
-    if text == "/users" and uid == owner_id:
+    if text == "/users" and manager(db, uid, owner_id):
         handle_callback(bot, db, chat, uid, 0, "users:list", owner_id); return
     if text == "/operations":
-        show_operations(bot, db, chat, uid); return
-    if text.startswith("/allreport ") and uid == owner_id:
+        show_operations(bot, db, chat, None if manager(db, uid, owner_id) else uid); return
+    if text.startswith("/allreport ") and reader(db, uid, owner_id):
         parts = text.split()
         try:
             if len(parts) != 3: raise ValueError("Пример: /allreport 2026-09-01 2026-09-30")
@@ -648,6 +698,20 @@ def handle_message(bot, db, chat, uid, text, owner_id=0):
     except ValueError as exc:
         bot.send(chat, str(exc)); return
     advance(bot, db, chat, uid, d)
+
+
+def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
+    from access import callback, permitted
+    if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    if callback(bot, db, chat, uid, update_id, value, owner_id): return
+    _handle_callback(bot, db, chat, uid, update_id, value, owner_id)
+
+
+def handle_message(bot, db, chat, uid, text, owner_id=0):
+    from access import message, permitted
+    if not permitted(bot, db, chat, uid, owner_id, text, True): return
+    if message(bot, db, chat, uid, text, owner_id): return
+    _handle_message(bot, db, chat, uid, text, owner_id)
 
 
 def run(bot, db, owner_id, sync=None):

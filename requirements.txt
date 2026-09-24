@@ -1,1 +1,2 @@
 google-auth[requests]>=2.35,<3
+reportlab>=4.4,<5

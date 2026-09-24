@@ -11,12 +11,16 @@ class FakeBot:
     def __init__(self):
         self.messages = []
         self.documents = []
+        self.pdf_documents = []
 
     def send(self, chat, text, options=None):
         self.messages.append((chat, text, options))
 
     def document(self, chat, name, content):
-        self.documents.append((chat, content.decode("utf-8-sig")))
+        if name.endswith(".pdf"):
+            self.pdf_documents.append((chat, content))
+        else:
+            self.documents.append((chat, content.decode("utf-8-sig")))
 
 
 class MultiuserTests(unittest.TestCase):
@@ -47,6 +51,11 @@ class MultiuserTests(unittest.TestCase):
         self.assertEqual(len(self.api.documents), 0)
         bot.handle_callback(self.api, self.db, 456, 456, 24, "csvall:0:0", 123)
         self.assertEqual(len(self.api.documents), 0)
+        bot.handle_message(self.api, self.db, 456, 456, "/report 2026-09-01 2026-09-30", 123)
+        self.assertTrue(self.api.pdf_documents[-1][1].startswith(b"%PDF-"))
+        pdf_count = len(self.api.pdf_documents)
+        bot.handle_callback(self.api, self.db, 456, 456, 24, "all:all", 123)
+        self.assertEqual(len(self.api.pdf_documents), pdf_count)
         bot.handle_message(self.api, self.db, 456, 456, "/report 2026-09-01 2026-09-30", 123)
         self.assertIn("300.00 USD", self.api.messages[-1][1])
         self.assertNotIn("400.00 USD", self.api.messages[-1][1])
