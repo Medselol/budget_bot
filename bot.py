@@ -23,6 +23,7 @@ COST_TYPES = ["Материалы", "Работа", "Техника", "Дост�
 SOURCES = ["Личные средства", "Инвестор", "Кредит", "Аванс покупателя", "Оплата покупателя", "Возврат поставщика", "Прочее"]
 SALES = {"Аванс покупателя", "Оплата покупателя"}
 CURRENCIES = ("UAH", "USD")
+DEFAULT_PROJECT_NAME = "Вита-Почтовая Дуплексы"
 
 
 def money(kop, currency="UAH"):
@@ -99,10 +100,16 @@ def connect(path, owner_id=0, initial_users=()):
         db.execute("UPDATE operations SET user_id=?", (owner_id,))
     if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         for uid in (owner_id, *initial_users):
-            db.execute("INSERT OR IGNORE INTO users(id,name) VALUES (?,?)", (uid, "Владелец" if uid == owner_id else f"Участник {uid}"))
+            db.execute("INSERT OR IGNORE INTO users(id,name) VALUES (?,?)", (uid, "Денис" if uid == owner_id else f"Участник {uid}"))
+    # Keep the owner's display name aligned with the configured owner account.
+    db.execute("UPDATE users SET name='Денис' WHERE id=?", (owner_id,))
     for name in ("Наличные", "Карта", "Счёт"):
         for row in db.execute("SELECT id FROM users"):
             db.execute("INSERT OR IGNORE INTO accounts(owner_id,name) VALUES (?,?)", (row[0], name))
+    # This bot tracks one construction site. Create the same default project
+    # for each active user so new operations never need a project picker.
+    for row in db.execute("SELECT id FROM users WHERE active=1"):
+        db.execute("INSERT OR IGNORE INTO projects(owner_id,name) VALUES (?,?)", (row[0], DEFAULT_PROJECT_NAME))
     db.commit()
     db.execute("PRAGMA foreign_keys=ON")
     if db.execute("PRAGMA foreign_key_check").fetchone():
@@ -113,6 +120,15 @@ def connect(path, owner_id=0, initial_users=()):
 def names(db, table, user_id=0):
     assert table in ("projects", "accounts")
     return db.execute(f"SELECT id,name FROM {table} WHERE owner_id=? ORDER BY id", (user_id,)).fetchall()
+
+
+def default_project_id(db, user_id):
+    row = db.execute("SELECT id FROM projects WHERE owner_id=? AND name=?", (user_id, DEFAULT_PROJECT_NAME)).fetchone()
+    if row:
+        return row[0]
+    with db:
+        db.execute("INSERT OR IGNORE INTO projects(owner_id,name) VALUES (?,?)", (user_id, DEFAULT_PROJECT_NAME))
+    return db.execute("SELECT id FROM projects WHERE owner_id=? AND name=?", (user_id, DEFAULT_PROJECT_NAME)).fetchone()[0]
 
 
 def draft(db, user_id):
@@ -420,7 +436,9 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     if value.startswith("new:"):
         kind = value.split(":")[1]
         if kind not in ("income", "expense", "transfer"): return
-        d = {"kind": kind, "step": "from_account" if kind == "transfer" else "project"}
+        d = {"kind": kind, "step": "from_account" if kind == "transfer" else ("stage" if kind == "expense" else "source")}
+        if kind != "transfer":
+            d["project_id"] = default_project_id(db, uid)
         set_draft(db, uid, d); prompt(bot, db, chat, d, uid); return
     if value == "ops:list":
         show_operations(bot, db, chat, uid); return
@@ -440,7 +458,9 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
                                                      ("Удалить", f"op:delete:{operation_id}"),
                                                      ("К списку", "ops:list")]); return
         if action == "edit":
-            edit_draft = {"kind": row["kind"], "step": "from_account" if row["kind"] == "transfer" else "project", "edit_id": operation_id}
+            edit_draft = {"kind": row["kind"], "step": "from_account" if row["kind"] == "transfer" else ("stage" if row["kind"] == "expense" else "source"), "edit_id": operation_id}
+            if row["kind"] != "transfer":
+                edit_draft["project_id"] = row["project_id"] or default_project_id(db, uid)
             set_draft(db, uid, edit_draft)
             bot.send(chat, f"Редактирование операции №{operation_id}. Пройди форму заново и подтверди сохранение; текущая запись изменится на месте.")
             prompt(bot, db, chat, edit_draft, uid); return
