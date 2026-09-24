@@ -8,28 +8,30 @@ def permitted(api, db, chat, uid, owner, value, message):
         return False
     common = value in ('menu', 'cancel', '/start', '/menu', '/help', '/cancel')
     if role == 'investor':
-        allowed = common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport '))
+        allowed = common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:')) or value=='team:balances'
         if not allowed:
             api.send(chat, 'У тебя доступ наблюдателя: можно смотреть общие PDF-отчёты, менять записи нельзя.', [('Общий отчёт PDF', 'all:menu')])
         return allowed
+    if role == 'foreman' and (value.startswith(('op:', 'ops:', 'report:', 'rp:', 'rproj:', 'csv:', '/report ', '/operations')) or value == 'balance'):
+        api.send(chat, 'В меню прораба доступны только приход и расход.', [('Приход','new:income'),('Расход','new:expense')]); return False
     d = ledger.draft(db, uid)
     if d and not common:
         if d.get('ledger_user_id', uid) != uid and not ledger.manager(db, uid, owner):
             ledger.clear_draft(db, uid)
             api.send(chat, 'Права изменились. Открой /start.'); return False
-        if role == 'foreman' and d.get('kind') not in (None, 'expense'):
+        if role == 'foreman' and d.get('kind') not in (None, 'expense', 'income'):
             ledger.clear_draft(db, uid)
-    if role == 'foreman' and (value.startswith(('new:income','new:transfer','/project ','/account '))):
-        api.send(chat, 'Прораб записывает расходы. Деньги на баланс выдаёт редактор.'); return False
-    if value.startswith(('fund:', 'team:', 'role:')) and not ledger.manager(db, uid, owner):
+    if role == 'foreman' and (value.startswith(('new:transfer','/project ','/account '))):
+        api.send(chat, 'Прораб записывает только приход и расход.'); return False
+    if value.startswith(('fund:', 'role:')) and not ledger.manager(db, uid, owner):
         api.send(chat, 'Недостаточно прав.'); return False
     # Existing forms must not allow a demoted user to save income or transfers.
     if role == 'foreman' and value.startswith(('op:edit:', 'op:delete:', 'op:delconfirm:')):
         try:
             r = db.execute('SELECT kind FROM operations WHERE id=?', (int(value.rsplit(':',1)[1]),)).fetchone()
         except ValueError: return False
-        if r and r['kind'] != 'expense':
-            api.send(chat, 'Прораб может менять только свои расходы.'); return False
+        if r and r['kind'] not in ('expense','income'):
+            api.send(chat, 'Прораб может менять только свои приходы и расходы.'); return False
     return True
 
 
@@ -103,7 +105,7 @@ def callback(api, db, chat, uid, update_id, value, owner):
             api.send(chat, 'Права обновлены: '+ledger.ROLE_NAMES[parts[3]] if cur.rowcount else 'Пользователь не найден.', [('Меню','menu')])
         return True
     if value=='team:balances':
-        if not ledger.manager(db,uid,owner): return True
+        if not ledger.reader(db,uid,owner): return True
         lines=['Балансы участников (с начала учёта):']
         for u in db.execute('SELECT id,name FROM users ORDER BY name'):
             lines.append('\n'+u['name'])

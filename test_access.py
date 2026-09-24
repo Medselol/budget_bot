@@ -47,9 +47,9 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(bot.role_for(self.db,789),'investor')
         self.cb(789,'all:all')
         self.assertTrue(self.api.pdf_documents[-1][1].startswith(b'%PDF-'))
-    def test_foreman_cannot_access_others_or_create_income(self):
+    def test_foreman_cannot_access_others_or_create_transfer(self):
         self.seed()
-        self.cb(456,'op:delconfirm:1');self.cb(456,'new:income');self.cb(456,'all:all')
+        self.cb(456,'op:delconfirm:1');self.cb(456,'new:transfer');self.cb(456,'all:all')
         self.assertEqual(len(bot.rows_for(self.db)),1)
         self.assertIsNone(bot.draft(self.db,456))
         self.assertFalse(self.api.pdf_documents)

@@ -203,7 +203,7 @@ def operation_text(db, row):
 
 
 def rows_for(db, start=None, end=None, project_id=None, user_id=None):
-    sql = """SELECT o.*,p.name AS project,a.name AS account,af.name AS from_account,at.name AS to_account,u.name AS user_name
+    sql = """SELECT o.*,p.name AS project,a.name AS account,(SELECT name FROM users WHERE id=af.owner_id) || ' · ' || af.name AS from_account,(SELECT name FROM users WHERE id=at.owner_id) || ' · ' || at.name AS to_account,u.name AS user_name
         FROM operations o LEFT JOIN projects p ON p.id=o.project_id
         LEFT JOIN accounts a ON a.id=o.account_id
         LEFT JOIN accounts af ON af.id=o.from_account_id
@@ -211,7 +211,7 @@ def rows_for(db, start=None, end=None, project_id=None, user_id=None):
         LEFT JOIN users u ON u.id=o.user_id WHERE 1=1"""
     args = []
     if user_id is not None:
-        sql += " AND (o.user_id=? OR (o.kind='transfer' AND (af.owner_id=? OR at.owner_id=?)))"; args.extend([user_id]*3)
+        sql += " AND ((o.kind!='transfer' AND o.user_id=?) OR (o.kind='transfer' AND (af.owner_id=? OR at.owner_id=?)))"; args.extend([user_id]*3)
     if start:
         sql += " AND o.occurred_on>=?"; args.append(start)
     if end:
@@ -336,14 +336,15 @@ def reader(db, uid, owner_id=0):
 def menu(bot, chat, is_owner=False, role=None):
     role = role or ("owner" if is_owner else "member")
     options = []
-    if role != "investor":
-        options = [("Расход", "new:expense")]
-        if role != "foreman": options += [("Приход", "new:income"), ("Перевод", "new:transfer")]
-        options += [("Операции", "ops:list"), ("Мой отчёт PDF", "report:menu"), ("Мои остатки", "balance")]
+    if role == "foreman":
+        options = [("Приход", "new:income"), ("Расход", "new:expense")]
+    elif role != "investor":
+        options = [("Расход", "new:expense"), ("Приход", "new:income"), ("Перевод", "new:transfer"),
+                   ("Операции", "ops:list"), ("Мой отчёт PDF", "report:menu"), ("Мои остатки", "balance")]
     if role in ("owner", "editor", "investor"):
-        options += [("Общий отчёт PDF", "all:menu")]
+        options += [("Общий отчёт PDF", "all:menu"), ("Участники и счета", "people:menu"), ("Балансы участников", "team:balances")]
     if role in ("owner", "editor"):
-        options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu"), ("Балансы участников", "team:balances")]
+        options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu")]
     bot.send(chat, "Учёт стройки. Выбери действие:", options)
 
 
@@ -387,9 +388,9 @@ def description(db, d, uid=0):
         r = db.execute("SELECT name FROM projects WHERE id=? AND owner_id=?", (d.get("project_id"), uid)).fetchone()
         line.append("Объект: " + (r[0] if r else "Общие / без объекта"))
     if d["kind"] == "expense":
-        line.extend(["Этап: " + d["category"], "Тип: " + d["cost_type"]])
+        line.extend(["Этап: " + (d.get("category") or "Прочее"), "Тип: " + (d.get("cost_type") or "Прочее")])
     if d["kind"] == "income":
-        line.append("Источник: " + d["source"])
+        line.append("Источник: " + (d.get("source") or "Прочее"))
     for key, label in (("account_id", "Счёт"), ("from_account_id", "Откуда"), ("to_account_id", "Куда")):
         if key in d:
             if d["kind"] == "transfer":
@@ -442,11 +443,17 @@ def report_text(db, start, end, pid, user_id=None):
     return "\n".join(lines), rows, name
 
 
-def show_report(bot, db, chat, start, end, pid, user_id=None):
+def show_report(bot, db, chat, start, end, pid, user_id=None, viewer_id=None):
     txt, rows, name = report_text(db, start, end, pid, user_id)
     csv_button = f"csvall:{start or '0'}:{end or '0'}" if user_id is None else f"csv:{start or '0'}:{end or '0'}:{pid or 0}"
+    if viewer_id is not None and user_id is not None:
+        csv_button = f"csvuser:{user_id}:{start or '0'}:{end or '0'}"
     from pdf_report import pdf_report
     scope = "Общий отчёт" if user_id is None else "Личный отчёт"
+    if user_id is not None:
+        participant = db.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
+        scope = "Участник: " + participant[0] if participant else scope
+        txt = scope + "\n" + txt
     bot.document(chat, "stroika_report.pdf", pdf_report(rows, start, end, DEFAULT_PROJECT_NAME if name == "Все объекты" else name, scope))
     bot.send(chat, txt[:4000] + ("\n…" if len(txt) > 4000 else ""), [("Скачать CSV для Excel", csv_button), ("Меню", "menu")])
 
@@ -703,6 +710,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from reports import callback as report_callback
+    if report_callback(bot, db, chat, uid, value, owner_id): return
     if callback(bot, db, chat, uid, update_id, value, owner_id): return
     _handle_callback(bot, db, chat, uid, update_id, value, owner_id)
 
