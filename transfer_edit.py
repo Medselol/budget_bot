@@ -5,7 +5,7 @@ import bot as ledger
 FIELDS = ('from_account_id','to_account_id','amount_kop','currency','occurred_on','comment')
 
 def snapshot(row):
-    return {k: row[k] for k in FIELDS}
+    return {k: row[k] for k in (*FIELDS,'target_amount_kop','target_currency','exchange_rate')}
 
 def account_label(db, aid):
     r=db.execute('SELECT u.name,a.name FROM accounts a JOIN users u ON u.id=a.owner_id WHERE a.id=?',(aid,)).fetchone()
@@ -31,7 +31,7 @@ def callback(api,db,chat,uid,value,owner):
     if is_op:
         action=value.split(':')[1]
         if action=='view':
-            api.send(chat,f"Перевод №{ident}\nОткуда: {account_label(db,row['from_account_id'])}\nКуда: {account_label(db,row['to_account_id'])}\nСумма: {ledger.money(row['amount_kop'],row['currency'])}\nДата: {row['occurred_on']}\nКомментарий: {row['comment'] or '—'}", [('Редактировать',f'op:edit:{ident}'),('Удалить',f'op:delete:{ident}'),('К списку','ops:list')]);return True
+            api.send(chat,ledger.operation_text(db,row), [('Редактировать',f'op:edit:{ident}'),('Удалить',f'op:delete:{ident}'),('К списку','ops:list')]);return True
         if action in ('edit','delete'):
             d={'step':'tx_edit' if action=='edit' else 'tx_delete','id':ident,'original':snapshot(row),'values':snapshot(row)}
             ledger.set_draft(db,uid,d)
@@ -71,6 +71,8 @@ def callback(api,db,chat,uid,value,owner):
             current=db.execute("SELECT * FROM operations WHERE id=? AND kind='transfer'",(d['id'],)).fetchone()
             if not current or snapshot(current)!=d['original']:
                 api.send(chat,'Запись уже изменена или удалена. Открой её заново.');return True
+            if not deleting and current['target_currency']:
+                api.send(chat,'Открой форму обмена валют заново.');return True
             if deleting: db.execute('DELETE FROM operations WHERE id=?',(d['id'],))
             else: db.execute('UPDATE operations SET '+','.join(k+'=?' for k in FIELDS)+' WHERE id=?',tuple(v[k] for k in FIELDS)+(d['id'],))
             ledger.bump_revision(db)

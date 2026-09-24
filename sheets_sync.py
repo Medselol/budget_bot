@@ -11,12 +11,12 @@ from urllib.parse import quote
 
 from bot import CURRENCIES, rows_for, summary
 
-HEADERS = ["ID", "Дата", "Telegram ID", "Пользователь", "Операция", "Объект", "Этап", "Тип затрат", "Источник", "Счёт", "Откуда", "Куда", "Валюта", "Сумма", "Комментарий"]
+HEADERS = ["ID", "Дата", "Telegram ID", "Пользователь", "Операция", "Объект", "Этап", "Тип затрат", "Источник", "Счёт", "Откуда", "Куда", "Валюта", "Сумма", "Комментарий", "Валюта зачисления", "Зачислено", "Курс UAH за USD"]
 TOTAL_HEADERS = ["Telegram ID", "Пользователь", "Валюта", "Приход", "Расход", "Изменение денег", "Доступ"]
 GUIDE = [
     ["УЧЁТ СТРОЙКИ", "Как пользоваться таблицей"],
     ["Операции", "Подробный журнал всех приходов, расходов и переводов. Фильтруйте строки по пользователю, объекту, валюте или дате."],
-    ["Итоги", "Суммы отдельно в UAH и USD: по каждому пользователю и общий итог."],
+    ["Итоги", "Суммы отдельно в UAH и USD. Обмен не входит в приход и расход, но влияет на изменение денег каждой валюты."],
     ["Важно", "Добавляйте и исправляйте операции в Telegram-боте. Таблица автоматически обновляется из бота."],
 ]
 TAB_NAMES = ("Инструкция", "Итоги", "Операции")
@@ -39,7 +39,7 @@ def snapshot(db):
     users = db.execute("SELECT id,name,active FROM users ORDER BY id").fetchall()
     operations = [HEADERS]
     for r in rows:
-        operations.append([r["id"], r["occurred_on"], r["user_id"], r["user_name"] or "", r["kind"], r["project"] or "", r["category"] or "", r["cost_type"] or "", r["source"] or "", r["account"] or "", r["from_account"] or "", r["to_account"] or "", r["currency"], amount(r["amount_kop"]), r["comment"]])
+        operations.append([r["id"], r["occurred_on"], r["user_id"], r["user_name"] or "", r["kind"], r["project"] or "", r["category"] or "", r["cost_type"] or "", r["source"] or "", r["account"] or "", r["from_account"] or "", r["to_account"] or "", r["currency"], amount(r["amount_kop"]), r["comment"], r["target_currency"] or "", amount(r["target_amount_kop"]) if r["target_currency"] else "", r["exchange_rate"] or ""])
     totals = [TOTAL_HEADERS]
     for u in users:
         per_user = summary(r for r in rows if r["user_id"] == u["id"])
@@ -185,7 +185,7 @@ class SheetsSync:
         try:
             ids = self._ensure_tabs()
             operations, totals = snapshot(db)
-            self.request("POST", "/values:batchClear", {"ranges": ["'Операции'!A:O", "'Итоги'!A:G", "'Инструкция'!A:B"]})
+            self.request("POST", "/values:batchClear", {"ranges": ["'Операции'!A:R", "'Итоги'!A:G", "'Инструкция'!A:B"]})
             self.request("POST", "/values:batchUpdate", {"valueInputOption": "RAW", "data": [
                 {"range": "'Операции'!A1", "values": operations},
                 {"range": "'Итоги'!A1", "values": totals},

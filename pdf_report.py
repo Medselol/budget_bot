@@ -55,8 +55,10 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
             cards.append(Paragraph(f'<font color="{color}">{label}</font><br/><font name="LedgerBold" size="{size}">{amount(val,currency)}</font>', ParagraphStyle('card',parent=styles['body'],leading=28)))
         story.append(table([cards],[width/2]*2))
         story.append(Spacer(1,6))
-        story.append(p('Изменение денег: '+amount(income-expense,currency)))
-        story.append(p('Приход включает вложения, займы, оплаты покупателей и возвраты. Переводы между кассами в итог не входят.', 'small'))
+        fx=sum((r['target_amount_kop'] if r.get('target_currency')==currency else 0)-(r['amount_kop'] if r['currency']==currency else 0) for r in rows if r.get('target_currency'))
+        story.append(p('Обмен валют: '+amount(fx,currency)))
+        story.append(p('Изменение денег: '+amount(income-expense+fx,currency)))
+        story.append(p('Приход включает вложения, займы, оплаты покупателей и возвраты. Переводы в одной валюте не входят в итог. Обмен отражён отдельно.', 'small'))
         groups=defaultdict(int)
         for r in part:
             if r['kind']=='expense': groups[r.get('category') or 'Прочее']+=r['amount_kop']
@@ -76,7 +78,7 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
                     months[r['occurred_on'][:7]][0 if r['kind']=='income' else 1] += r['amount_kop']
             if not months: continue
             story.append(p(currency, 'h'))
-            data = [[p('Месяц','small'),p('Приход','small'),p('Расходы','small'),p('Изменение','small')]]
+            data = [[p('Месяц','small'),p('Приход','small'),p('Расходы','small'),p('Приход − расход','small')]]
             for month,(inc,exp) in sorted(months.items()):
                 data.append([p(month),p(amount(inc,currency)),p(amount(exp,currency)),p(amount(inc-exp,currency))])
             story.append(table(data,[76,145,145,145],True))
@@ -88,6 +90,7 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
         for r in rows:
             kind=r['kind']
             label,color={'income':('↓ Приход',GREEN),'expense':('↑ Расход',RED),'transfer':('↔ Перевод',BLUE)}[kind]
+            if r.get('target_currency'): label='↔ Обмен валют'
             detail=[f'<font name="LedgerBold" color="{color}">{label}</font>']
             if kind=='transfer':
                 detail.append(escape(f'{r.get("from_account") or ""} → {r.get("to_account") or ""}'))
@@ -95,12 +98,13 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
                 detail.append(escape(r.get('category') or r.get('source') or 'Прочее'))
                 if r.get('cost_type'): detail.append(escape(r['cost_type']))
                 if r.get('account'): detail.append('Счёт: '+escape(r['account']))
+            if r.get('target_currency'): detail.append(escape('Курс: 1 USD = '+r['exchange_rate']+' UAH'))
             if r.get('receipt_label'): detail.append(escape(r['receipt_label']))
             if r.get('receipt_url'):
                 detail.append('<link href="'+escape(r['receipt_url'], {'"':'&quot;'})+'" color="'+BLUE+'"><u>Открыть чеки / операцию</u></link>')
             if r.get('project'): detail.append(escape(r['project']))
             if r.get('comment'): detail.append(escape(r['comment']).replace('\n','<br/>'))
-            data.append([p(f'{r["occurred_on"]}\n{r.get("user_name") or "Участник"}\n№ {r["id"]}'),Paragraph('<br/>'.join(detail),styles['body']),p(amount(r['amount_kop'],r['currency']))])
+            data.append([p(f'{r["occurred_on"]}\n{r.get("user_name") or "Участник"}\n№ {r["id"]}'),Paragraph('<br/>'.join(detail),styles['body']),p(amount(r['amount_kop'],r['currency']) + (' → '+amount(r['target_amount_kop'],r['target_currency']) if r.get('target_currency') else ''))])
         story.append(table(data,[111,245,155],True))
     def footer(canvas, document):
         canvas.setStrokeColor(colors.HexColor('#DCE5E9')); canvas.line(42,34,553,34)

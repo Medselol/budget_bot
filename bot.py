@@ -122,6 +122,8 @@ def connect(path, owner_id=0, initial_users=()):
     db.execute("PRAGMA foreign_keys=ON")
     if db.execute("PRAGMA foreign_key_check").fetchone():
         raise RuntimeError("Нарушены связи в базе после обновления")
+    from exchange import init as init_exchange
+    init_exchange(db)
     from receipts import init as init_receipts
     init_receipts(db)
     from control_data import init as init_controls
@@ -188,6 +190,8 @@ def bump_revision(db):
 
 
 def update_operation(db, data, operation_id, user_id):
+    existing=db.execute("SELECT target_currency FROM operations WHERE id=?",(operation_id,)).fetchone()
+    if existing and existing[0]: raise ValueError("Используй форму обмена валют для исправления этой операции.")
     if data.get("currency", "UAH") not in CURRENCIES:
         raise ValueError("Неизвестная валюта")
     if data.get("kind") not in ("income", "expense", "transfer"):
@@ -213,7 +217,7 @@ def operation_row(db, operation_id, user_id):
 
 
 def operation_text(db, row):
-    data = {key: row[key] for key in ("kind", "occurred_on", "project_id", "category", "cost_type", "source", "account_id", "from_account_id", "to_account_id", "amount_kop", "currency", "comment")}
+    data = {key: row[key] for key in ("kind", "occurred_on", "project_id", "category", "cost_type", "source", "account_id", "from_account_id", "to_account_id", "amount_kop", "currency", "comment", "target_amount_kop", "target_currency", "exchange_rate")}
     return f"Операция №{row['id']}\n" + description(db, data, row["user_id"])
 
 
@@ -237,12 +241,15 @@ def rows_for(db, start=None, end=None, project_id=None, user_id=None):
 
 
 def summary(rows):
-    result = {code: {"financing": 0, "sales": 0, "refunds": 0, "expense": 0, "by_stage": {}, "by_source": {}, "by_type": {}} for code in CURRENCIES}
+    result = {code: {"financing": 0, "sales": 0, "refunds": 0, "expense": 0, "exchange_net": 0, "by_stage": {}, "by_source": {}, "by_type": {}} for code in CURRENCIES}
     for row in rows:
         currency = row["currency"]
         if currency not in result:
             raise ValueError("Неизвестная валюта в базе")
         part = result[currency]
+        if row['kind']=='transfer' and 'target_currency' in row.keys() and row['target_currency']:
+            part['exchange_net'] -= row['amount_kop']
+            result[row['target_currency']]['exchange_net'] += row['target_amount_kop']
         if row["kind"] == "income":
             source = row["source"] or "Прочее"
             group = "sales" if source in SALES else "refunds" if source == "Возврат поставщика" else "financing"
@@ -254,7 +261,7 @@ def summary(rows):
                 label = row[field] or "Прочее"
                 part[key][label] = part[key].get(label, 0) + row["amount_kop"]
     for part in result.values():
-        part["cash_net"] = part["financing"] + part["sales"] + part["refunds"] - part["expense"]
+        part["cash_net"] = part["financing"] + part["sales"] + part["refunds"] - part["expense"] + part["exchange_net"]
     return result
 
 
@@ -265,7 +272,7 @@ def balances(db, user_id=0):
         currency = row["currency"]
         if row["kind"] == "transfer":
             if row["from_account_id"] in result: result[row["from_account_id"]][1][currency] -= amount
-            if row["to_account_id"] in result: result[row["to_account_id"]][1][currency] += amount
+            if row["to_account_id"] in result: result[row["to_account_id"]][1][row["target_currency"] or currency] += row["target_amount_kop"] if row["target_currency"] else amount
         elif row["kind"] == "income":
             result[row["account_id"]][1][currency] += amount
         else:
@@ -284,12 +291,12 @@ def csv_report(rows, start, end, project):
     writer = csv.writer(stream, delimiter=";")
     writer.writerow(["Отчёт по стройке", project, f"{start or 'начало'} — {end or 'сегодня'}"])
     for currency in CURRENCIES:
-        for label, key in (("Вложения и займы", "financing"), ("Поступления от покупателей", "sales"), ("Возвраты", "refunds"), ("Расходы", "expense"), ("Чистое изменение денег", "cash_net")):
+        for label, key in (("Вложения и займы", "financing"), ("Поступления от покупателей", "sales"), ("Возвраты", "refunds"), ("Расходы", "expense"), ("Обмен валют, чистое изменение", "exchange_net"), ("Чистое изменение денег", "cash_net")):
             writer.writerow([label, f"{Decimal(totals[currency][key]) / 100:.2f}", currency])
     writer.writerow([])
-    writer.writerow(["ID", "Пользователь ID", "Пользователь", "Дата", "Операция", "Объект", "Этап", "Тип затрат", "Источник прихода", "Счёт", "Счёт отправителя", "Счёт получателя", "Сумма", "Валюта", "Комментарий"])
+    writer.writerow(["ID", "Пользователь ID", "Пользователь", "Дата", "Операция", "Объект", "Этап", "Тип затрат", "Источник прихода", "Счёт", "Счёт отправителя", "Счёт получателя", "Сумма", "Валюта", "Комментарий", "Зачислено", "Валюта зачисления", "Курс UAH за USD"])
     for row in rows:
-        writer.writerow([row["id"], row["user_id"], safe_cell(row["user_name"]), row["occurred_on"], row["kind"], safe_cell(row["project"]), safe_cell(row["category"]), safe_cell(row["cost_type"]), safe_cell(row["source"]), safe_cell(row["account"]), safe_cell(row["from_account"]), safe_cell(row["to_account"]), f"{Decimal(row['amount_kop']) / 100:.2f}", row["currency"], safe_cell(row["comment"])])
+        writer.writerow([row["id"], row["user_id"], safe_cell(row["user_name"]), row["occurred_on"], row["kind"], safe_cell(row["project"]), safe_cell(row["category"]), safe_cell(row["cost_type"]), safe_cell(row["source"]), safe_cell(row["account"]), safe_cell(row["from_account"]), safe_cell(row["to_account"]), f"{Decimal(row['amount_kop']) / 100:.2f}", row["currency"], safe_cell(row["comment"]), f"{Decimal(row['target_amount_kop']) / 100:.2f}" if row["target_currency"] else "", row["target_currency"] or "", row["exchange_rate"] or ""])
     return ("\ufeff" + stream.getvalue()).encode("utf-8")
 
 
@@ -419,6 +426,9 @@ def prompt(bot, db, chat, d, uid=0):
 def description(db, d, uid=0):
     title = {"income": "Приход", "expense": "Расход", "transfer": "Перевод"}[d["kind"]]
     line = [title + ": " + money(d["amount_kop"], d.get("currency", "UAH")), "Дата: " + d["occurred_on"]]
+    if d.get('target_currency'):
+        line[0] = 'Обмен: ' + money(d['amount_kop'],d['currency']) + ' → ' + money(d['target_amount_kop'],d['target_currency'])
+        line.append('Курс: 1 USD = '+d['exchange_rate']+' UAH')
     if d["kind"] != "transfer":
         r = db.execute("SELECT name FROM projects WHERE id=? AND owner_id=?", (d.get("project_id"), uid)).fetchone()
         line.append("Объект: " + (r[0] if r else "Общие / без объекта"))
@@ -465,7 +475,7 @@ def report_text(db, start, end, pid, user_id=None):
     lines = [f"Отчёт: {name}", f"Период: {start or 'с начала'} — {end or 'сегодня'}"]
     for currency in CURRENCIES:
         t = totals[currency]
-        lines.extend(["", "Гривны (UAH):" if currency == "UAH" else "Доллары (USD):", "Приход денег:", "  Вложения и займы: " + money(t["financing"], currency), "  От покупателей: " + money(t["sales"], currency), "  Возвраты: " + money(t["refunds"], currency), "Расходы: " + money(t["expense"], currency), "Изменение денег: " + money(t["cash_net"], currency)])
+        lines.extend(["", "Гривны (UAH):" if currency == "UAH" else "Доллары (USD):", "Приход денег:", "  Вложения и займы: " + money(t["financing"], currency), "  От покупателей: " + money(t["sales"], currency), "  Возвраты: " + money(t["refunds"], currency), "Расходы: " + money(t["expense"], currency), "Обмен валют: " + money(t["exchange_net"], currency), "Изменение денег: " + money(t["cash_net"], currency)])
         if t["by_stage"]:
             lines.extend(["По этапам:"] + [f"  {k}: {money(v, currency)}" for k, v in sorted(t["by_stage"].items())])
         if t["by_source"]:
@@ -506,6 +516,7 @@ def show_operations(bot, db, chat, user_id):
     options = []
     for row in rows:
         label = {"expense": "Расход", "income": "Приход", "transfer": "Перевод"}[row["kind"]]
+        if row["target_currency"]: label = "Обмен"
         options.append((f"№{row['id']} · {label} · {money(row['amount_kop'], row['currency'])}", f"op:view:{row['id']}"))
     options.append(("Меню", "menu"))
     bot.send(chat, "Последние операции. Выбери запись для просмотра, изменения или удаления:", options)
@@ -766,6 +777,8 @@ def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     if control_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from receipts import callback as receipt_callback
     if receipt_callback(bot, db, chat, uid, value, owner_id): return
+    from exchange import callback as exchange_callback
+    if exchange_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from transfer_edit import callback as transfer_callback
     if transfer_callback(bot, db, chat, uid, value, owner_id): return
     from participants import callback as participant_callback
@@ -785,6 +798,8 @@ def _dispatch_message(bot, db, chat, uid, text, owner_id=0):
     if control_message(bot, db, chat, uid, text, owner_id): return
     from receipts import message as receipt_message
     if receipt_message(bot, db, chat, uid, text, owner_id): return
+    from exchange import message as exchange_message
+    if exchange_message(bot, db, chat, uid, text, owner_id): return
     from transfer_edit import message as transfer_message
     if transfer_message(bot, db, chat, uid, text, owner_id): return
     from participants import message as participant_message

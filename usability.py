@@ -54,7 +54,7 @@ def callback(api, db, chat, uid, value, owner):
     if section == 'finance':
         options = [('Операции', 'ops:list'), ('Мой баланс', 'balance'), ('Мои чеки', 'rc:mine'),
                    ('Между своими счетами', 'new:transfer'), ('Мой отчёт PDF', 'report:menu')]
-        if ledger.manager(db, uid, owner): options += [('Выдать деньги', 'fund:menu'), ('Балансы участников', 'team:balances')]
+        if ledger.manager(db, uid, owner): options += [('Обмен USD ↔ UAH', 'fx:new'), ('Выдать деньги', 'fund:menu'), ('Балансы участников', 'team:balances')]
         text = 'Финансы. Записи, остатки и переводы. Выдача денег участнику учитывается как перевод.'
     elif section == 'reports':
         options = [('Общий отчёт PDF', 'all:menu'), ('Участники и счета', 'people:menu'),
