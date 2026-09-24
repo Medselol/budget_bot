@@ -294,8 +294,25 @@ def csv_report(rows, start, end, project):
 
 
 def keyboard(options, width=2):
-    buttons = [{"text": label, "callback_data": callback} for label, callback in options]
-    return {"inline_keyboard": [buttons[i:i + width] for i in range(0, len(buttons), width)]}
+    # Keep navigation separate from actions; long labels get a full row.
+    rows, pending = [], []
+    footer = []
+    def flush():
+        if pending:
+            rows.append(pending[:]); pending.clear()
+    for label, callback in options:
+        button = {"text": label, "callback_data": callback}
+        if callback in ('nav:back', 'menu'):
+            footer.append(button); continue
+        if len(label) > 24:
+            flush(); rows.append([button])
+        else:
+            pending.append(button)
+            if len(pending) >= width: flush()
+    flush()
+    if footer: rows.append(sorted(footer, key=lambda b: b['callback_data'] == 'menu'))
+    return {"inline_keyboard": rows}
+
 
 
 class Telegram:
@@ -350,23 +367,13 @@ def reader(db, uid, owner_id=0):
 
 def menu(bot, chat, is_owner=False, role=None):
     role = role or ("owner" if is_owner else "member")
-    options = []
-    if role == "foreman":
-        options = [("Приход", "new:income"), ("Расход", "new:expense"), ("Мой баланс", "balance"), ("Мои чеки", "rc:mine")]
-    elif role != "investor":
-        options = [("Расход", "new:expense"), ("Приход", "new:income"), ("Перевод", "new:transfer"),
-                   ("Операции", "ops:list"), ("Мой отчёт PDF", "report:menu"), ("Мои остатки", "balance")]
-    if role in ("owner", "editor", "investor"):
-        options += [("Общий отчёт PDF", "all:menu"), ("Участники и счета", "people:menu"), ("Балансы участников", "team:balances")]
-    if role in ("owner", "editor"):
-        options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu"), ("Проверка расходов", "rc:list")]
-    options += [("Контроль стройки", "ctl:home"), ("Фотоотчёты стройки", "site:home")]
-    if role in ("foreman", "member"):
-        options += [("Заявки на деньги", "ctl:req:list:open:0")]
-    bot.send(chat, "Учёт стройки. Выбери действие:", options)
+    from usability import home_options
+    bot.send(chat, "Учёт стройки. Выбери действие:", home_options(role))
 
 
 def prompt(bot, db, chat, d, uid=0):
+    from usability import FormPrompt
+    bot = FormPrompt(bot, d)
     uid = d.get("ledger_user_id", uid)
     step = d["step"]
     if step == "project":
@@ -389,7 +396,7 @@ def prompt(bot, db, chat, d, uid=0):
     elif step == "amount":
         bot.send(chat, f"Напиши сумму в {'гривнах' if d.get('currency', 'UAH') == 'UAH' else 'долларах'}, например 12500,50.")
     elif step == "date":
-        bot.send(chat, "Дата операции:", [("Сегодня", "date:today"), ("Другая дата", "date:custom")])
+        bot.send(chat, "Дата операции:", [("Сегодня", "date:today"), ("Вчера", "date:yesterday"), ("Другая дата", "date:custom")])
     elif step == "date_text":
         bot.send(chat, "Напиши дату ГГГГ-ММ-ДД.")
     elif step == "comment":
@@ -611,8 +618,9 @@ def _handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
             currency = value.split(":", 1)[1]
             if currency not in CURRENCIES: return
             d["currency"] = currency
-        elif value == "date:today" and step == "date":
-            d["occurred_on"] = datetime.now(TZ).date().isoformat()
+        elif value in ("date:today", "date:yesterday") and step == "date":
+            from datetime import timedelta
+            d["occurred_on"] = (datetime.now(TZ).date() - timedelta(days=value == "date:yesterday")).isoformat()
         elif value == "date:custom" and step == "date":
             d["step"] = "date_text"; set_draft(db, uid, d); prompt(bot, db, chat, d); return
         elif value == "comment:skip" and step == "comment":
@@ -736,6 +744,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from usability import callback as ui_callback
+    if ui_callback(bot, db, chat, uid, value, owner_id): return
     from site_reports import callback as site_callback
     if site_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from controls import callback as control_callback

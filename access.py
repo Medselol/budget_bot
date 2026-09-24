@@ -9,7 +9,7 @@ def permitted(api, db, chat, uid, owner, value, message):
     common = value in ('menu', 'cancel', '/start', '/menu', '/help', '/cancel')
     if role == 'investor':
         photo_dates = message and (ledger.draft(db, uid) or {}).get('step') == 'site_dates' and not value.startswith('/')
-        allowed = photo_dates or common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:', 'rc:', 'ctl:', 'site:', '/start receipt_')) or value in ('team:balances','team:archive')
+        allowed = photo_dates or common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:', 'rc:', 'ctl:', 'site:', 'ui:', '/start receipt_')) or value in ('team:balances','team:archive')
         if not allowed:
             api.send(chat, 'У тебя доступ наблюдателя: можно смотреть общие PDF-отчёты, менять записи нельзя.', [('Общий отчёт PDF', 'all:menu')])
         return allowed

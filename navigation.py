@@ -58,8 +58,11 @@ class Session:
 def dispatch(api,db,chat,uid,owner,value,handler):
     if chat!=uid or not ledger.role_for(db,uid,owner): return
     session=Session(api,db,chat,uid,owner)
-    if value in ('menu','cancel','/start','/menu','/cancel','/help'):
+    if value in ('menu','cancel','/start','/menu','/cancel'):
         session.home()
+    elif value=='/help':
+        from usability import callback
+        callback(session,db,chat,uid,value,owner)
     elif value=='nav:back': session.back()
     else:
         from audit_log import actor
