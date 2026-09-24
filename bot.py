@@ -338,7 +338,7 @@ def menu(bot, chat, is_owner=False, role=None):
     role = role or ("owner" if is_owner else "member")
     options = []
     if role == "foreman":
-        options = [("Приход", "new:income"), ("Расход", "new:expense")]
+        options = [("Приход", "new:income"), ("Расход", "new:expense"), ("Мой баланс", "balance")]
     elif role != "investor":
         options = [("Расход", "new:expense"), ("Приход", "new:income"), ("Перевод", "new:transfer"),
                    ("Операции", "ops:list"), ("Мой отчёт PDF", "report:menu"), ("Мои остатки", "balance")]

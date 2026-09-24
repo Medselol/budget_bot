@@ -12,8 +12,8 @@ def permitted(api, db, chat, uid, owner, value, message):
         if not allowed:
             api.send(chat, 'У тебя доступ наблюдателя: можно смотреть общие PDF-отчёты, менять записи нельзя.', [('Общий отчёт PDF', 'all:menu')])
         return allowed
-    if role == 'foreman' and (value.startswith(('op:', 'ops:', 'report:', 'rp:', 'rproj:', 'csv:', '/report ', '/operations')) or value == 'balance'):
-        api.send(chat, 'В меню прораба доступны только приход и расход.', [('Приход','new:income'),('Расход','new:expense')]); return False
+    if role == 'foreman' and (value.startswith(('op:', 'ops:', 'report:', 'rp:', 'rproj:', 'csv:', '/report ', '/operations'))):
+        api.send(chat, 'В меню прораба доступны приход, расход и свой баланс.', [('Приход','new:income'),('Расход','new:expense')]); return False
     d = ledger.draft(db, uid)
     if d and not common:
         if d.get('ledger_user_id', uid) != uid and not ledger.manager(db, uid, owner):

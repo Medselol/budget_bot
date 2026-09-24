@@ -58,6 +58,17 @@ class ParticipantTests(unittest.TestCase):
         self.assertEqual(len(bot.rows_for(self.db,user_id=456)),1)
         self.cb('participant:restoreconfirm:456');self.assertIsNotNone(bot.role_for(self.db,456))
         self.assertEqual(bot.balances(self.db,456)[aid][1]['UAH'],100)
+    def test_removed_participant_only_in_archive_and_restored_to_active(self):
+        self.cb('participant:removeconfirm:456')
+        self.assertNotIn('participant:view:456', [v for _,v in self.api.messages[-1][2]])
+        self.cb('users:list')
+        self.assertNotIn('participant:view:456', [v for _,v in self.api.messages[-1][2]])
+        self.cb('participant:archive:0')
+        self.assertIn('participant:view:456', [v for _,v in self.api.messages[-1][2]])
+        self.assertNotIn('participant:view:123', [v for _,v in self.api.messages[-1][2]])
+        self.cb('participant:restoreconfirm:456')
+        self.assertIn('participant:view:456', [v for _,v in self.api.messages[-1][2]])
+
     def test_observers_and_members_cannot_manage(self):
         for uid in (456,789):
             for value in ('participant:add','participant:rename:123','participant:removeconfirm:123','participant:removeconfirm:456','participant:admit:editor'):

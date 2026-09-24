@@ -74,6 +74,15 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(len(bot.rows_for(self.db)),2)
         ident=bot.rows_for(self.db)[1]['id'];self.cb(456,f'op:delconfirm:{ident}')
         self.assertEqual(len(bot.rows_for(self.db)),2)
+    def test_foreman_balance_includes_funding_and_expense_only_own_accounts(self):
+        self.seed();self.fund()
+        bot.record(self.db,dict(kind='expense',occurred_on='2026-09-24',account_id=self.b,amount_kop=15000,currency='UAH'),3,456)
+        self.cb(456,'balance')
+        text=self.api.messages[-1][1]
+        self.assertIn('250.00 грн',text)
+        self.assertNotIn('600.00 грн',text)
+        self.assertIn('0.00 USD',text)
+
     def test_disabled_user_blocked_at_handlers(self):
         self.db.execute('UPDATE users SET active=0 WHERE id=987');self.db.commit()
         self.msg(987,'/adduser 555 Bad');self.cb(987,'role:set:456:editor')

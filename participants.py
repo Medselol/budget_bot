@@ -32,17 +32,19 @@ def lookup(api,db,text):
     raise ValueError('Введи @ник Telegram. Если ника нет — ID участника, который уже нажал /start.')
 
 
-def listing(api,db,chat,page=0):
-    rows=db.execute('SELECT * FROM users ORDER BY active DESC,name,id').fetchall()
+def listing(api,db,chat,page=0,archived=False):
+    rows=db.execute('SELECT * FROM users WHERE active=? ORDER BY name,id',(0 if archived else 1,)).fetchall()
+    route = 'archive' if archived else 'page'
     page=max(0,min(page,max(0,(len(rows)-1)//12)))
     options=[('Добавить по @нику','participant:add'),('Найти участника','participant:find')]
     for r in rows[page*12:(page+1)*12]:
         label=f"{r['name']} · {ledger.ROLE_NAMES.get(r['role'],r['role'])}"+(' · доступ закрыт' if not r['active'] else '')
         options.append((label,f"participant:view:{r['id']}"))
-    if page:options.append(('← Назад',f'participant:page:{page-1}'))
-    if (page+1)*12<len(rows):options.append(('Далее →',f'participant:page:{page+1}'))
+    if page:options.append(('← Назад',f'participant:{route}:{page-1}'))
+    if (page+1)*12<len(rows):options.append(('Далее →',f'participant:{route}:{page+1}'))
+    options.append(('Действующие участники','users:list') if archived else ('Архив участников','participant:archive:0'))
     options.append(('Меню','menu'))
-    api.send(chat,'Участники. Выбери человека для изменения имени, прав или доступа:',options)
+    api.send(chat,'Архив. Доступ закрыт; операции и остатки сохранены.' if archived else 'Действующие участники. Выбери человека для изменения имени, прав или доступа:',options)
 
 
 def card(api,db,chat,target,uid,owner):
@@ -53,7 +55,7 @@ def card(api,db,chat,target,uid,owner):
     options=[]
     if target!=owner or uid==owner:options.append(('Переименовать',f'participant:rename:{target}'))
     if target!=owner:
-        options += [('Изменить права',f'role:pick:{target}'),('Удалить доступ' if r['active'] else 'Восстановить доступ',f"participant:{'remove' if r['active'] else 'restore'}:{target}")]
+        options += [('Изменить права',f'role:pick:{target}'),('Удалить участника' if r['active'] else 'Восстановить доступ',f"participant:{'remove' if r['active'] else 'restore'}:{target}")]
     options.append(('К участникам','users:list'))
     api.send(chat,text,options)
 
@@ -69,7 +71,7 @@ def callback(api,db,chat,uid,value,owner):
         api.send(chat,'Введи @ник Telegram. Человек должен сначала нажать /start в этом боте. Если ника нет — можно ввести его ID.',[('Отмена','cancel')]);return True
     try:
         if len(p)!=3:return True
-        if p[1]=='page':listing(api,db,chat,int(p[2]));return True
+        if p[1] in ('page','archive'):listing(api,db,chat,int(p[2]),archived=p[1]=='archive');return True
         # New participant gets no access until a role is explicitly chosen.
         if p[1]=='admit':
             d=ledger.draft(db,uid)
@@ -100,13 +102,13 @@ def callback(api,db,chat,uid,value,owner):
             api.send(chat,'Введи новое имя для учёта (до 80 символов). Ник в Telegram не изменится.',[('Отмена','cancel')]);return True
         if action in ('remove','restore'):
             name=db.execute('SELECT name FROM users WHERE id=?',(target,)).fetchone()[0]
-            api.send(chat,('Закрыть' if action=='remove' else 'Восстановить')+f' доступ для {name}? Все операции и остатки сохранятся.',[('Подтвердить',f'participant:{action}confirm:{target}'),('Отмена',f'participant:view:{target}')]);return True
+            api.send(chat,(f'Удалить {name} из действующих участников? Доступ будет закрыт, участник переместится в архив. Все операции и остатки сохранятся.' if action=='remove' else f'Восстановить доступ для {name}?'),[('Подтвердить',f'participant:{action}confirm:{target}'),('Отмена',f'participant:view:{target}')]);return True
         if action in ('removeconfirm','restoreconfirm'):
             with db:
                 db.execute('UPDATE users SET active=? WHERE id=?',(int(action=='restoreconfirm'),target))
                 db.execute('DELETE FROM drafts WHERE user_id=?',(target,))
-            api.send(chat,'Доступ закрыт.' if action=='removeconfirm' else 'Доступ восстановлен. Участник может нажать /start.')
-            if ledger.manager(db,uid,owner):card(api,db,chat,target,uid,owner)
+            api.send(chat,'Участник удалён из действующего списка и перенесён в архив. Доступ закрыт.' if action=='removeconfirm' else 'Доступ восстановлен. Участник может нажать /start.')
+            if ledger.manager(db,uid,owner):listing(api,db,chat)
             return True
     except (ValueError,OverflowError) as exc:api.send(chat,str(exc))
     return True
