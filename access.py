@@ -8,7 +8,7 @@ def permitted(api, db, chat, uid, owner, value, message):
         return False
     common = value in ('menu', 'cancel', '/start', '/menu', '/help', '/cancel')
     if role == 'investor':
-        allowed = common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:', 'rc:', '/start receipt_')) or value in ('team:balances','team:archive')
+        allowed = common or value in ('all:menu', 'all:month', 'all:all') or value.startswith(('csvall:', '/allreport ', 'overview:', 'people:', 'csvuser:', 'rc:', 'ctl:', '/start receipt_')) or value in ('team:balances','team:archive')
         if not allowed:
             api.send(chat, 'У тебя доступ наблюдателя: можно смотреть общие PDF-отчёты, менять записи нельзя.', [('Общий отчёт PDF', 'all:menu')])
         return allowed

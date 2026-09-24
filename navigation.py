@@ -8,7 +8,7 @@ ROOT='Учёт стройки. Выбери действие:'
 def init(db):
     db.execute('CREATE TABLE IF NOT EXISTS navigation(user_id INTEGER PRIMARY KEY, data TEXT NOT NULL)')
     db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('navigation_revision','0')")
-    for table in ('operations','users','accounts','projects','receipts','expense_reviews'):
+    for table in ('operations','users','accounts','projects','receipts','expense_reviews','budgets','funding_requests','request_files','obligations','obligation_payments'):
         for action in ('INSERT','UPDATE','DELETE'):
             db.execute(f'''CREATE TRIGGER IF NOT EXISTS nav_{table}_{action.lower()} AFTER {action} ON {table}
                 BEGIN UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='navigation_revision'; END''')
@@ -61,5 +61,12 @@ def dispatch(api,db,chat,uid,owner,value,handler):
     if value in ('menu','cancel','/start','/menu','/cancel','/help'):
         session.home()
     elif value=='nav:back': session.back()
-    else: handler(session)
+    else:
+        from audit_log import actor
+        import sqlite3
+        with actor(db,uid):
+            try: handler(session)
+            except sqlite3.IntegrityError as exc:
+                db.rollback()
+                session.send(chat,str(exc),[('Главное меню','menu')])
     session.finish()

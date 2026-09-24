@@ -52,7 +52,9 @@ def valid_date(value):
 
 
 def connect(path, owner_id=0, initial_users=()):
-    db = sqlite3.connect(path)
+    from audit_log import Connection, register
+    db = sqlite3.connect(path, factory=Connection)
+    register(db)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript("""
@@ -122,6 +124,10 @@ def connect(path, owner_id=0, initial_users=()):
         raise RuntimeError("Нарушены связи в базе после обновления")
     from receipts import init as init_receipts
     init_receipts(db)
+    from control_data import init as init_controls
+    init_controls(db)
+    from audit_log import init as init_audit
+    init_audit(db)
     from navigation import init as init_navigation
     init_navigation(db)
     return db
@@ -310,7 +316,7 @@ class Telegram:
         self.call("sendMessage", payload)
 
     def document(self, chat, name, content):
-        mime = {".pdf":"application/pdf", ".jpg":"image/jpeg", ".png":"image/png"}.get(Path(name).suffix.lower(), "text/csv")
+        mime = {".pdf":"application/pdf", ".jpg":"image/jpeg", ".png":"image/png", ".zip":"application/zip"}.get(Path(name).suffix.lower(), "text/csv")
         boundary = "----buildledger" + str(int(time.time() * 1000))
         data = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"
@@ -352,6 +358,9 @@ def menu(bot, chat, is_owner=False, role=None):
         options += [("Общий отчёт PDF", "all:menu"), ("Участники и счета", "people:menu"), ("Балансы участников", "team:balances")]
     if role in ("owner", "editor"):
         options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu"), ("Проверка расходов", "rc:list")]
+    options += [("Контроль стройки", "ctl:home")]
+    if role in ("foreman", "member"):
+        options += [("Заявки на деньги", "ctl:req:list:open:0")]
     bot.send(chat, "Учёт стройки. Выбери действие:", options)
 
 
@@ -725,6 +734,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from controls import callback as control_callback
+    if control_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from receipts import callback as receipt_callback
     if receipt_callback(bot, db, chat, uid, value, owner_id): return
     from transfer_edit import callback as transfer_callback
@@ -740,6 +751,8 @@ def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
 def _dispatch_message(bot, db, chat, uid, text, owner_id=0):
     from access import message, permitted
     if not permitted(bot, db, chat, uid, owner_id, text, True): return
+    from controls import message as control_message
+    if control_message(bot, db, chat, uid, text, owner_id): return
     from receipts import message as receipt_message
     if receipt_message(bot, db, chat, uid, text, owner_id): return
     from transfer_edit import message as transfer_message
@@ -765,17 +778,24 @@ def handle_message(bot, db, chat, uid, text, owner_id=0):
 def handle_media(bot, db, chat, uid, payload, update_id, owner_id=0):
     from navigation import dispatch
     from receipts import media
+    from controls import media as control_media
     dispatch(bot, db, chat, uid, owner_id, '',
-             lambda api: media(api, db, chat, uid, payload, update_id, owner_id))
+             lambda api: control_media(api, db, chat, uid, payload, update_id, owner_id) or media(api, db, chat, uid, payload, update_id, owner_id))
 
 
 def run(bot, db, owner_id, sync=None):
+    from maintenance import Scheduler
+    scheduler = Scheduler()
     saved = db.execute("SELECT value FROM settings WHERE key='offset'").fetchone()
     offset = int(saved[0]) if saved else 0
     if sync:
         sync(db)
     while True:
         try:
+            try:
+                scheduler.tick(bot, db, owner_id)
+            except Exception:
+                logging.exception("Background maintenance failed")
             updates = bot.call("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]})
             for update in updates:
                 uid = (update.get("message") or update.get("callback_query") or {}).get("from", {}).get("id")
