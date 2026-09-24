@@ -123,13 +123,25 @@ class MultiuserTests(unittest.TestCase):
         users = {r["id"]: r["name"] for r in self.db.execute("SELECT id,name FROM users")}
         self.assertEqual(users, {123: "Денис", 456: "Игорь"})
 
+    def test_single_default_project_skips_picker_for_each_user(self):
+        project = bot.default_project_id(self.db, 123)
+        self.assertEqual(self.db.execute("SELECT name FROM projects WHERE id=?", (project,)).fetchone()[0], "Вита-Почтовая Дуплексы")
+        bot.handle_callback(self.api, self.db, 123, 123, 41, "new:expense", 123)
+        self.assertEqual(bot.draft(self.db, 123)["step"], "stage")
+        self.assertEqual(bot.draft(self.db, 123)["project_id"], project)
+        self.assertNotIn("Выбери объект", self.api.messages[-1][1])
+        bot.handle_message(self.api, self.db, 123, 123, "/adduser 456 Игорь", 123)
+        self.assertEqual(self.db.execute("SELECT name FROM users WHERE id=123").fetchone()[0], "Денис")
+        self.assertEqual(bot.default_project_id(self.db, 456), self.db.execute("SELECT id FROM projects WHERE owner_id=456 AND name=?", ("Вита-Почтовая Дуплексы",)).fetchone()[0])
+
     def test_edit_and_confirmed_delete_operation_in_bot(self):
         operation_id = bot.record(self.db, {"occurred_on": "2026-09-23", "kind": "expense", "project_id": None,
                                             "category": "Стены", "cost_type": "Работа", "account_id": 1,
                                             "amount_kop": 10000, "currency": "UAH", "comment": "старое"}, 30, 123)
         revision_before = int(self.db.execute("SELECT value FROM settings WHERE key='ledger_revision'").fetchone()[0])
         bot.handle_callback(self.api, self.db, 123, 123, 31, f"op:edit:{operation_id}", 123)
-        bot.handle_callback(self.api, self.db, 123, 123, 32, "proj:0", 123)
+        self.assertEqual(bot.draft(self.db, 123)["step"], "stage")
+        self.assertEqual(bot.draft(self.db, 123)["project_id"], bot.default_project_id(self.db, 123))
         bot.handle_callback(self.api, self.db, 123, 123, 33, "stage:0", 123)
         bot.handle_callback(self.api, self.db, 123, 123, 34, "type:0", 123)
         bot.handle_callback(self.api, self.db, 123, 123, 35, "acct:1", 123)
