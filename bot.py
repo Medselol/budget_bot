@@ -713,6 +713,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from transfer_edit import callback as transfer_callback
+    if transfer_callback(bot, db, chat, uid, value, owner_id): return
     from participants import callback as participant_callback
     if participant_callback(bot, db, chat, uid, value, owner_id): return
     from reports import callback as report_callback
@@ -724,6 +726,8 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
 def handle_message(bot, db, chat, uid, text, owner_id=0):
     from access import message, permitted
     if not permitted(bot, db, chat, uid, owner_id, text, True): return
+    from transfer_edit import message as transfer_message
+    if transfer_message(bot, db, chat, uid, text, owner_id): return
     from participants import message as participant_message
     if participant_message(bot, db, chat, uid, text, owner_id): return
     if message(bot, db, chat, uid, text, owner_id): return
