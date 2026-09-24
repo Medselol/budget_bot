@@ -122,6 +122,8 @@ def connect(path, owner_id=0, initial_users=()):
         raise RuntimeError("Нарушены связи в базе после обновления")
     from receipts import init as init_receipts
     init_receipts(db)
+    from navigation import init as init_navigation
+    init_navigation(db)
     return db
 
 
@@ -720,7 +722,7 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
     advance(bot, db, chat, uid, d)
 
 
-def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
+def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
     from receipts import callback as receipt_callback
@@ -735,7 +737,7 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     _handle_callback(bot, db, chat, uid, update_id, value, owner_id)
 
 
-def handle_message(bot, db, chat, uid, text, owner_id=0):
+def _dispatch_message(bot, db, chat, uid, text, owner_id=0):
     from access import message, permitted
     if not permitted(bot, db, chat, uid, owner_id, text, True): return
     from receipts import message as receipt_message
@@ -746,6 +748,25 @@ def handle_message(bot, db, chat, uid, text, owner_id=0):
     if participant_message(bot, db, chat, uid, text, owner_id): return
     if message(bot, db, chat, uid, text, owner_id): return
     _handle_message(bot, db, chat, uid, text, owner_id)
+
+
+def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
+    from navigation import dispatch
+    dispatch(bot, db, chat, uid, owner_id, value,
+             lambda api: _dispatch_callback(api, db, chat, uid, update_id, value, owner_id))
+
+
+def handle_message(bot, db, chat, uid, text, owner_id=0):
+    from navigation import dispatch
+    dispatch(bot, db, chat, uid, owner_id, text,
+             lambda api: _dispatch_message(api, db, chat, uid, text, owner_id))
+
+
+def handle_media(bot, db, chat, uid, payload, update_id, owner_id=0):
+    from navigation import dispatch
+    from receipts import media
+    dispatch(bot, db, chat, uid, owner_id, '',
+             lambda api: media(api, db, chat, uid, payload, update_id, owner_id))
 
 
 def run(bot, db, owner_id, sync=None):
@@ -770,8 +791,7 @@ def run(bot, db, owner_id, sync=None):
                             bot.call("answerCallbackQuery", {"callback_query_id": payload["id"]})
                             handle_callback(bot, db, chat, uid, update["update_id"], payload.get("data", ""), owner_id)
                         elif "photo" in payload or "document" in payload:
-                            from receipts import media
-                            media(bot, db, chat, uid, payload, update["update_id"], owner_id)
+                            handle_media(bot, db, chat, uid, payload, update["update_id"], owner_id)
                         elif "text" in payload:
                             handle_message(bot, db, chat, uid, payload["text"].strip(), owner_id)
                         if sync:
