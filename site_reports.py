@@ -54,8 +54,26 @@ def new(db,uid,owner):
     return db.execute("SELECT id FROM site_reports WHERE user_id=? AND status='draft'",(uid,)).fetchone()[0]
 
 
+def editable(db,ident,uid,owner):
+    return report(db,ident,uid,owner,not ledger.manager(db,uid,owner))
+
+
+def delete_album(db,uid,owner,ident,version):
+    with db:
+        db.execute('BEGIN IMMEDIATE')
+        if not ledger.manager(db,uid,owner): raise ValueError('Удалять альбом может администратор.')
+        r=report(db,ident,uid,owner)
+        if r['version']!=version: raise ValueError('Альбом изменился. Открой его заново.')
+        db.execute('DELETE FROM site_reports WHERE id=? AND version=?',(ident,version))
+        db.execute("UPDATE site_notifications SET state='skipped' WHERE report_id=? AND state='pending'",(ident,))
+
+
+def refresh_notices(db,ident,version):
+    db.execute("UPDATE site_notifications SET version=version+1 WHERE report_id=? AND version=? AND state='pending'",(ident,version))
+
+
 def change(db,uid,owner,ident,version,field,value):
-    report(db,ident,uid,owner,True)
+    editable(db,ident,uid,owner)
     if field not in FIELDS: raise ValueError('Неизвестное поле.')
     value=value.strip()
     if field=='stage' and value not in ledger.STAGES: raise ValueError('Выбери этап кнопкой.')
@@ -68,6 +86,7 @@ def change(db,uid,owner,ident,version,field,value):
     with db:
         cur=db.execute(f'UPDATE site_reports SET {field}=?,version=version+1 WHERE id=? AND version=?',(value,ident,version))
         if not cur.rowcount: raise ValueError('Отчёт изменился. Открой его заново.')
+        refresh_notices(db,ident,version)
 
 
 def transition(db,uid,owner,ident,version,action,note=''):
@@ -99,7 +118,7 @@ def transition(db,uid,owner,ident,version,action,note=''):
 
 
 def save_photo(db,uid,owner,ident,update_id,content,ext):
-    report(db,ident,uid,owner,True)
+    r=editable(db,ident,uid,owner)
     if ext not in ('.jpg','.png') or not content or len(content)>attachments.LIMIT: raise ValueError('Нужно фото JPG или PNG до 10 МБ.')
     with db:
         if db.execute('SELECT 1 FROM site_photos WHERE update_id=?',(update_id,)).fetchone(): return
@@ -107,6 +126,7 @@ def save_photo(db,uid,owner,ident,update_id,content,ext):
             raise ValueError('В одном отчёте максимум 10 фото. Создай следующий отчёт для остальных.')
         db.execute('INSERT INTO site_photos(report_id,update_id,filename,content) VALUES (?,?,?,?)',(ident,update_id,f'stroyka_{ident}_{update_id}{ext}',content))
         db.execute('UPDATE site_reports SET version=version+1 WHERE id=?',(ident,))
+        refresh_notices(db,ident,r['version'])
 
 
 
@@ -160,12 +180,14 @@ def card(api,db,chat,uid,owner,ident):
         if r['status']=='draft': opts += [('Удалить черновик',f'site:discard:{ident}:{r["version"]}')]
     if ledger.manager(db,uid,owner) and r['status']=='submitted':
         opts += [('Принять',f'site:accept:{ident}:{r["version"]}'),('Вернуть с замечанием',f'site:rework:{ident}:{r["version"]}')]
+    if ledger.manager(db,uid,owner):
+        opts += [('Редактировать альбом',f'site:manage:{ident}'),('Удалить альбом',f'site:deletealbum:{ident}:{r["version"]}')]
     opts += [('К журналу','site:list:0')]
     api.send(chat,text,opts)
 
 
 def edit_prompt(api,db,chat,uid,owner,ident,field,wizard=False):
-    r=report(db,ident,uid,owner,True)
+    r=editable(db,ident,uid,owner)
     if field not in FIELDS: raise ValueError('Неизвестное поле.')
     d=state(db,uid,'site_edit',ident=ident,version=r['version'],field=field,wizard=wizard)
     opts=[('К отчёту',f'site:view:{ident}')]
@@ -229,6 +251,21 @@ def callback(api,db,chat,uid,update_id,value,owner):
             if not r['stage']: edit_prompt(api,db,chat,uid,owner,ident,'stage',True)
             else: card(api,db,chat,uid,owner,ident)
         elif cmd=='view': card(api,db,chat,uid,owner,int(p[2]))
+        elif cmd=='manage':
+            ident=int(p[2])
+            if not ledger.manager(db,uid,owner): raise ValueError('Недостаточно прав.')
+            r=editable(db,ident,uid,owner)
+            opts=[(label,f'site:edit:{ident}:{field}') for field,label in FIELDS.items()]
+            opts += [('Добавить фотографии',f'site:upload:{ident}'),('Просмотр / удаление фото',f'site:photos:{ident}'),('К отчёту',f'site:view:{ident}')]
+            api.send(chat,f'Редактирование альбома №{ident}. Выбери поле или фотографии. Изменения сохраняются сразу, автор и статус отчёта сохраняются.',opts)
+        elif cmd=='deletealbum':
+            ident=int(p[2]);version=int(p[3])
+            if not ledger.manager(db,uid,owner): raise ValueError('Недостаточно прав.')
+            r=report(db,ident,uid,owner)
+            if version!=r['version']: raise ValueError('Альбом изменился. Открой его заново.')
+            n=db.execute('SELECT count(*) FROM site_photos WHERE report_id=?',(ident,)).fetchone()[0]
+            d=state(db,uid,'site_confirm',ident=ident,version=version,action='deletealbum')
+            api.send(chat,f'Удалить весь альбом №{ident}? Будут удалены отчёт и все {n} фото из журнала. Отменить удаление в боте нельзя. Ранее отправленные копии в Telegram останутся.',[('Да, удалить альбом',f'site:confirm:{d["nonce"]}'),('Отмена',f'site:view:{ident}')])
         elif cmd=='list': listing(api,db,chat,uid,owner,int(p[2]))
         elif cmd=='reset': ledger.clear_draft(db,uid);listing(api,db,chat,uid,owner)
         elif cmd=='filter':
@@ -268,7 +305,7 @@ def callback(api,db,chat,uid,update_id,value,owner):
             else: raise ValueError('Неверная кнопка.')
             change(db,uid,owner,d['ident'],d['version'],d['field'],text);after_field(api,db,chat,uid,owner,d)
         elif cmd=='upload':
-            ident=int(p[2]);report(db,ident,uid,owner,True);state(db,uid,'site_upload',ident=ident)
+            ident=int(p[2]);editable(db,ident,uid,owner);state(db,uid,'site_upload',ident=ident)
             api.send(chat,'Пришли фотографии по одной или альбомом. До 10 фото в отчёте, каждое до 10 МБ; JPG / PNG. Затем нажми «Готово».',[('Готово',f'site:view:{ident}')])
         elif cmd=='photos':
             ident=int(p[2]);r=report(db,ident,uid,owner)
@@ -294,7 +331,12 @@ def callback(api,db,chat,uid,update_id,value,owner):
         elif cmd=='confirm':
             d=ledger.draft(db,uid) or {}
             if d.get('step')!='site_confirm' or d.get('nonce')!=p[2]: raise ValueError('Подтверждение устарело. Открой отчёт.')
-            if d['action']=='remove':
+            if d['action']=='deletealbum':
+                delete_album(db,uid,owner,d['ident'],d['version'])
+                ledger.clear_draft(db,uid)
+                api.send(chat,'Альбом удалён вместе со всеми фотографиями.',[('К журналу','site:list:0')])
+                return True
+            elif d['action']=='remove':
                 remove_photo(db,uid,owner,d['ident'],d['photo_id'],d['version'])
             else: transition(db,uid,owner,d['ident'],d['version'],d['action'],d.get('note',''))
             if d['action']=='discard': listing(api,db,chat,uid,owner)
@@ -332,7 +374,7 @@ def media(api,db,chat,uid,payload,update_id,owner):
     if d.get('step')!='site_upload': return False
     try:
         if chat!=uid: raise ValueError('Открой личный чат.')
-        report(db,d['ident'],uid,owner,True)
+        editable(db,d['ident'],uid,owner)
         if not payload.get('photo') and payload.get('document',{}).get('mime_type') not in ('image/jpeg','image/png'):
             raise ValueError('Для фотоотчёта нужны фотографии JPG / PNG, не чек PDF.')
         content,ext=attachments.download(api,payload)
