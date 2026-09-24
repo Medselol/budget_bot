@@ -65,7 +65,7 @@ class Runtime:
         self.lock = threading.Lock()
         self.threads = []
     def start(self):
-        targets = [self._jobs, self._maintenance]
+        targets = [self._jobs, self._maintenance, self._notifications]
         if self.sync: targets.append(self._sync)
         for target in targets:
             thread=threading.Thread(target=target,daemon=True)
@@ -129,6 +129,18 @@ class Runtime:
     def close(self):
         self.stop.set()
         for thread in self.threads: thread.join(timeout=1)
+
+    def _notifications(self):
+        from request_notifications import deliver
+        db=connection(self.path)
+        try:
+            while not self.stop.is_set():
+                try: deliver(self.api,db,self.owner)
+                except Exception as exc:
+                    db.rollback()
+                    logging.error('Notification worker failed error=%s',type(exc).__name__)
+                if self.stop.wait(2): break
+        finally: db.close()
 
 
 def defer(api, db, chat, kind, work):

@@ -48,6 +48,8 @@ def init(db):
     if 'classification' not in {r['name'] for r in db.execute('PRAGMA table_info(obligations)')}:
         db.execute("ALTER TABLE obligations ADD COLUMN classification TEXT NOT NULL DEFAULT 'Прочее'")
         db.commit()
+    import request_notifications
+    request_notifications.init(db)
 
 
 def require_manager(db, uid, owner):
@@ -107,6 +109,8 @@ def decide_request(db, uid, owner, ident, version, action, reason=''):
         else: raise ValueError('Действие недоступно для текущего статуса.')
         db.execute('UPDATE funding_requests SET status=?,decision=?,reviewer_id=?,version=version+1 WHERE id=?',
                    (status,reason[:500],uid if action in ('approve','reject') else None,ident))
+        from request_notifications import enqueue
+        enqueue(db, ident, owner)
 
 
 def pay_request(db, uid, owner, ident, version, source_id, update_id):
@@ -122,6 +126,8 @@ def pay_request(db, uid, owner, ident, version, source_id, update_id):
         cur=db.execute("INSERT INTO operations(update_id,user_id,occurred_on,kind,from_account_id,to_account_id,amount_kop,currency,comment) VALUES (?,?,?,'transfer',?,?,?,?,?)",
             (update_id,uid,today().isoformat(),a['id'],b['id'],r['amount_kop'],r['currency'],f"Выдача по заявке №{ident}: {r['purpose']}"))
         db.execute("UPDATE funding_requests SET status='paid',operation_id=?,reviewer_id=?,version=version+1 WHERE id=?",(cur.lastrowid,uid,ident))
+        from request_notifications import enqueue
+        enqueue(db, ident, owner)
         ledger.bump_revision(db)
     return cur.lastrowid
 
