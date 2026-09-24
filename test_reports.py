@@ -41,7 +41,7 @@ class ReportTests(unittest.TestCase):
         self.cb(789,'team:balances');self.assertIn('600.00 грн',self.api.messages[-2][1])
     def test_foreman_income_full_flow_and_balance_menu(self):
         self.msg(456,'/start')
-        self.assertEqual({x[0] for x in self.api.messages[-1][2]},{'Приход','Расход','Мой баланс'})
+        self.assertEqual({x[0] for x in self.api.messages[-1][2]},{'Приход','Расход','Мой баланс','Мои чеки'})
         for v in ('new:income','source:0',f'acct:{self.b}','currency:UAH'):self.cb(456,v)
         self.msg(456,'100');self.cb(456,'date:today');self.cb(456,'comment:skip');self.cb(456,'save',71)
         self.assertEqual(bot.balances(self.db,456)[self.b][1]['UAH'],10000)

@@ -95,6 +95,9 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
                 detail.append(escape(r.get('category') or r.get('source') or 'Прочее'))
                 if r.get('cost_type'): detail.append(escape(r['cost_type']))
                 if r.get('account'): detail.append('Счёт: '+escape(r['account']))
+            if r.get('receipt_label'): detail.append(escape(r['receipt_label']))
+            if r.get('receipt_url'):
+                detail.append('<link href="'+escape(r['receipt_url'], {'"':'&quot;'})+'" color="'+BLUE+'"><u>Открыть чеки / операцию</u></link>')
             if r.get('project'): detail.append(escape(r['project']))
             if r.get('comment'): detail.append(escape(r['comment']).replace('\n','<br/>'))
             data.append([p(f'{r["occurred_on"]}\n{r.get("user_name") or "Участник"}\n№ {r["id"]}'),Paragraph('<br/>'.join(detail),styles['body']),p(amount(r['amount_kop'],r['currency']))])

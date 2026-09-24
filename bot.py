@@ -120,6 +120,8 @@ def connect(path, owner_id=0, initial_users=()):
     db.execute("PRAGMA foreign_keys=ON")
     if db.execute("PRAGMA foreign_key_check").fetchone():
         raise RuntimeError("Нарушены связи в базе после обновления")
+    from receipts import init as init_receipts
+    init_receipts(db)
     return db
 
 
@@ -306,7 +308,7 @@ class Telegram:
         self.call("sendMessage", payload)
 
     def document(self, chat, name, content):
-        mime = "application/pdf" if name.lower().endswith(".pdf") else "text/csv"
+        mime = {".pdf":"application/pdf", ".jpg":"image/jpeg", ".png":"image/png"}.get(Path(name).suffix.lower(), "text/csv")
         boundary = "----buildledger" + str(int(time.time() * 1000))
         data = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"
@@ -340,14 +342,14 @@ def menu(bot, chat, is_owner=False, role=None):
     role = role or ("owner" if is_owner else "member")
     options = []
     if role == "foreman":
-        options = [("Приход", "new:income"), ("Расход", "new:expense"), ("Мой баланс", "balance")]
+        options = [("Приход", "new:income"), ("Расход", "new:expense"), ("Мой баланс", "balance"), ("Мои чеки", "rc:mine")]
     elif role != "investor":
         options = [("Расход", "new:expense"), ("Приход", "new:income"), ("Перевод", "new:transfer"),
                    ("Операции", "ops:list"), ("Мой отчёт PDF", "report:menu"), ("Мои остатки", "balance")]
     if role in ("owner", "editor", "investor"):
         options += [("Общий отчёт PDF", "all:menu"), ("Участники и счета", "people:menu"), ("Балансы участников", "team:balances")]
     if role in ("owner", "editor"):
-        options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu")]
+        options += [("Пользователи", "users:list"), ("Выдать деньги", "fund:menu"), ("Проверка расходов", "rc:list")]
     bot.send(chat, "Учёт стройки. Выбери действие:", options)
 
 
@@ -457,6 +459,8 @@ def show_report(bot, db, chat, start, end, pid, user_id=None, viewer_id=None):
         participant = db.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
         scope = "Участник: " + participant[0] if participant else scope
         txt = scope + "\n" + txt
+    from receipts import enrich
+    rows = enrich(bot, db, rows)
     bot.document(chat, "stroika_report.pdf", pdf_report(rows, start, end, DEFAULT_PROJECT_NAME if name == "Все объекты" else name, scope))
     bot.send(chat, txt[:4000] + ("\n…" if len(txt) > 4000 else ""), [("Скачать CSV для Excel", csv_button), ("Меню", "menu")])
 
@@ -507,7 +511,7 @@ def _handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
         if action == "view":
             bot.send(chat, operation_text(db, row), [("Редактировать", f"op:edit:{operation_id}"),
                                                      ("Удалить", f"op:delete:{operation_id}"),
-                                                     ("К списку", "ops:list")]); return
+                                                     ("Чеки", f"rc:view:{operation_id}"), ("К списку", "ops:list")]); return
         if action == "edit":
             edit_draft = {"kind": row["kind"], "step": "from_account" if row["kind"] == "transfer" else ("stage" if row["kind"] == "expense" else "source"), "edit_id": operation_id}
             edit_draft["ledger_user_id"] = row["user_id"]
@@ -608,6 +612,12 @@ def _handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
             else:
                 ident = record(db, d, update_id, uid)
                 clear_draft(db, uid); bot.send(chat, f"Сохранено. Операция №{ident}.")
+            if d['kind'] == 'expense':
+                from receipts import begin
+                with db:
+                    db.execute("UPDATE expense_reviews SET status='pending',reviewer_id=NULL,reviewed_at=NULL WHERE operation_id=?", (ident,))
+                begin(bot, db, chat, uid, ident)
+                return
             menu(bot, chat, role=role_for(db, uid, owner_id)); return
         else:
             bot.send(chat, "Кнопка устарела. Продолжи текущий шаг:"); prompt(bot, db, chat, d, uid); return
@@ -713,6 +723,8 @@ def _handle_message(bot, db, chat, uid, text, owner_id=0):
 def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     from access import callback, permitted
     if not permitted(bot, db, chat, uid, owner_id, value, False): return
+    from receipts import callback as receipt_callback
+    if receipt_callback(bot, db, chat, uid, value, owner_id): return
     from transfer_edit import callback as transfer_callback
     if transfer_callback(bot, db, chat, uid, value, owner_id): return
     from participants import callback as participant_callback
@@ -726,6 +738,8 @@ def handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
 def handle_message(bot, db, chat, uid, text, owner_id=0):
     from access import message, permitted
     if not permitted(bot, db, chat, uid, owner_id, text, True): return
+    from receipts import message as receipt_message
+    if receipt_message(bot, db, chat, uid, text, owner_id): return
     from transfer_edit import message as transfer_message
     if transfer_message(bot, db, chat, uid, text, owner_id): return
     from participants import message as participant_message
@@ -755,6 +769,9 @@ def run(bot, db, owner_id, sync=None):
                         if "callback_query" in update:
                             bot.call("answerCallbackQuery", {"callback_query_id": payload["id"]})
                             handle_callback(bot, db, chat, uid, update["update_id"], payload.get("data", ""), owner_id)
+                        elif "photo" in payload or "document" in payload:
+                            from receipts import media
+                            media(bot, db, chat, uid, payload, update["update_id"], owner_id)
                         elif "text" in payload:
                             handle_message(bot, db, chat, uid, payload["text"].strip(), owner_id)
                         if sync:
