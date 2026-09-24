@@ -4,6 +4,7 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP
 import bot as ledger
 
+DEFAULT_RATE='44.5'
 FIELDS=('from_account_id','to_account_id','amount_kop','currency','target_amount_kop','target_currency','exchange_rate','occurred_on','comment')
 
 
@@ -92,7 +93,7 @@ def prompt(api,db,chat,d):
     elif step=='fx_amount': api.send(chat,'Сколько '+d['currency']+' списать? Введи сумму:')
     elif step=='fx_rate':
         side='покупки доллара обменником' if d['currency']=='USD' else 'продажи доллара обменником'
-        api.send(chat,'Введи фактический курс: сколько гривен за 1 доллар. Например 41,50. Для этого направления используй курс '+side+'.\n\nАвтоматический курс обменников пока не подключён. Проверь курс у обменника перед подтверждением.')
+        api.send(chat,'Курс по умолчанию: 1 USD = 44,50 грн. Нажми кнопку или введи другой курс вручную. Для этого направления используй курс '+side+'.\n\nКурс установлен вручную, автоматического обновления нет.', [('Использовать 44,50',prefix+'default_rate')])
     elif step=='fx_date': api.send(chat,'Дата обмена:', [('Сегодня',prefix+'today'),('Вчера',prefix+'yesterday'),('Другая дата',prefix+'custom')])
     elif step=='fx_date_text': api.send(chat,'Дата обмена: ГГГГ-ММ-ДД.')
     elif step=='fx_comment': api.send(chat,'Комментарий к обмену:', [('Пропустить',prefix+'skip')])
@@ -124,6 +125,9 @@ def callback(api,db,chat,uid,update_id,value,owner):
             elif step in ('fx_from','fx_to') and choice.isdigit():
                 if not db.execute('SELECT 1 FROM accounts WHERE id=? AND owner_id=?',(int(choice),d['ledger_user_id'])).fetchone(): raise ValueError('Счёт недоступен.')
                 d['from_account_id' if step=='fx_from' else 'to_account_id']=int(choice);d['step']='fx_to' if step=='fx_from' else 'fx_amount'
+            elif step=='fx_rate' and choice=='default_rate':
+                converted(d['amount_kop'],d['currency'],DEFAULT_RATE)
+                d.update(exchange_rate=DEFAULT_RATE,step='fx_date')
             elif step=='fx_date' and choice in ('today','yesterday','custom'):
                 from datetime import timedelta
                 if choice=='custom': d['step']='fx_date_text'

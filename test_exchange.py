@@ -44,6 +44,17 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(balances,{'UAH':415000,'USD':90000})
         self.assertEqual(fx.save(self.db,123,123,self.data(to_account_id=self.a),500),ident)
         self.assertEqual(len(bot.rows_for(self.db)),2)
+    def test_default_rate_button_in_both_directions(self):
+        for currency,amount,source,target,expected in (('USD','100',self.a,self.b,445000),('UAH','4450',self.b,self.a,10000)):
+            self.cb('fx:new');self.choose(currency);self.choose(source);self.choose(target);self.msg(amount)
+            self.assertTrue(any('default_rate' in v for _,v in self.api.messages[-1][2]))
+            self.choose('default_rate')
+            self.assertEqual(bot.draft(self.db,123)['exchange_rate'],'44.5')
+            self.choose('today');self.choose('skip');self.choose('save')
+            row=self.db.execute('SELECT * FROM operations ORDER BY id DESC LIMIT 1').fetchone()
+            self.assertEqual(row['target_amount_kop'],expected)
+            self.assertEqual(row['exchange_rate'],'44.5')
+        self.assertEqual(bot.balances(self.db,123)[self.a][1]['USD'],100000)
     def test_permissions_foreign_accounts_and_demotion(self):
         for uid in (456,789):
             self.cb('fx:new',uid);self.assertIsNone(bot.draft(self.db,uid))
