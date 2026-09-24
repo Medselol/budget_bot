@@ -30,7 +30,7 @@ def card(api,db,chat,uid,owner,ident):
     if not allowed(db,uid,owner,row): api.send(chat,'Операция недоступна.');return
     status,reason,count=metadata(db,ident)
     api.send(chat,ledger.operation_text(db,row)+f'\nПроверка: {STATUS.get(status,status)}\nЧеков: {count}'+ ('\nБез чека: '+reason if reason else ''),
-        [('Посмотреть чеки',f'rc:files:{ident}')]+([('Добавить чеки',f'rc:add:{ident}'),('Нет чека — пояснить',f'rc:reason:{ident}')] if allowed(db,uid,owner,row,True) else [])+([('Проверено',f'rc:approve:{ident}'),('Вернуть на проверку',f'rc:pending:{ident}')] if ledger.manager(db,uid,owner) else [])+([('Доставка уведомлений',f'ec:delivery:{ident}'),('К проверке расходов','rc:list')] if ledger.manager(db,uid,owner) else [])+[('Меню','menu')])
+        [('Посмотреть чеки',f'rc:files:{ident}')]+([('Добавить чеки',f'rc:add:{ident}'),('Нет чека — пояснить',f'rc:reason:{ident}')] if allowed(db,uid,owner,row,True) else [])+(([('Вернуть на проверку',f'rc:pending:{ident}')] if status=='approved' else [('Проверено',f'rc:approve:{ident}')]) if ledger.manager(db,uid,owner) else [])+([('Доставка уведомлений',f'ec:delivery:{ident}'),('К проверке расходов','rc:list')] if ledger.manager(db,uid,owner) else [])+[('Меню','menu')])
 
 def begin(api,db,chat,uid,ident):
     ledger.set_draft(db,uid,{'step':'receipt_upload','operation_id':ident})
@@ -71,6 +71,12 @@ def callback(api,db,chat,uid,value,owner):
         if page: buttons.append(('Назад',f'rc:mine:{page-1}'))
         if len(rows)>8: buttons.append(('Далее',f'rc:mine:{page+1}'))
         api.send(chat,'Твои расходы и чеки:',buttons+[('Меню','menu')]);return True
+    if value=='rc:next':
+        if not ledger.manager(db,uid,owner): return True
+        count,ident=pending_summary(db,uid)
+        if ident is not None: card(api,db,chat,uid,owner,ident)
+        else: api.send(chat,'В этой очереди больше нет расходов на проверке.',[('К проверке расходов','rc:list'),('Главное меню','menu')])
+        return True
     if value.startswith('rc:list'): review_list(api,db,chat,uid,owner,value);return True
     if value in ('rc:filtermonth','rc:filteruser','rc:reset') or value.startswith('rc:user:'):
         if not ledger.manager(db,uid,owner): return True
@@ -101,13 +107,61 @@ def callback(api,db,chat,uid,value,owner):
             api.send(chat,'Прикрепи чек или укажи причину его отсутствия.', [('Нет чека — пояснить',f'rc:reason:{ident}')]);return True
         ledger.clear_draft(db,uid)
     elif action in ('approve','pending') and ledger.manager(db,uid,owner):
+        target='approved' if action=='approve' else 'pending'
+        changed=set_review_status(db,uid,owner,ident,target)
+        if action=='approve':
+            review_result(api,db,chat,uid,ident,changed)
+        else:
+            text=(f'↩ Расход №{ident} возвращён на проверку.' if changed
+                  else f'Расход №{ident} уже находится на проверке.')
+            api.send(chat,text,[('Открыть расход',f'rc:view:{ident}'),('Очередь проверки','rc:list:pending:0'),('Главное меню','menu')])
+        return True
+    card(api,db,chat,uid,owner,ident);return True
+
+
+def set_review_status(db,uid,owner,ident,target):
+    if target not in ('pending','approved') or not ledger.manager(db,uid,owner):
+        raise ValueError('Недостаточно прав для проверки расхода.')
+    with db:
+        # Serialize competing reviewers; a second click must not replace the
+        # original reviewer/time or enqueue another reopening notification.
+        db.execute('BEGIN IMMEDIATE')
+        if not row_for(db,ident): raise ValueError('Расход недоступен.')
         previous_status=metadata(db,ident)[0]
-        with db:
-            db.execute("INSERT INTO expense_reviews(operation_id,status,reviewer_id,reviewed_at) VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(operation_id) DO UPDATE SET status=excluded.status,reviewer_id=excluded.reviewer_id,reviewed_at=excluded.reviewed_at",(ident,'approved' if action=='approve' else 'pending',uid))
-            if action=='pending':
+        if previous_status==target:
+            # Older pending expenses can still need their first alert event.
+            if target=='pending':
                 from expense_notifications import review_reopened
                 review_reopened(db,ident,previous_status)
-    card(api,db,chat,uid,owner,ident);return True
+            return False
+        db.execute("INSERT INTO expense_reviews(operation_id,status,reviewer_id,reviewed_at) VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(operation_id) DO UPDATE SET status=excluded.status,reviewer_id=excluded.reviewer_id,reviewed_at=excluded.reviewed_at",(ident,target,uid))
+        if target=='pending':
+            from expense_notifications import review_reopened
+            review_reopened(db,ident,previous_status)
+    return True
+
+
+def pending_summary(db,uid):
+    filt=ledger.draft(db,uid) or {}
+    sql="FROM operations o LEFT JOIN expense_reviews v ON v.operation_id=o.id WHERE o.kind='expense' AND COALESCE(v.status,'pending')='pending'"
+    args=[]
+    if filt.get('review_month'): sql+=' AND substr(o.occurred_on,1,7)=?';args.append(filt['review_month'])
+    if filt.get('review_user'): sql+=' AND o.user_id=?';args.append(filt['review_user'])
+    count=db.execute('SELECT COUNT(*) '+sql,args).fetchone()[0]
+    row=db.execute('SELECT o.id '+sql+' ORDER BY o.occurred_on DESC,o.id DESC LIMIT 1',args).fetchone()
+    return count,(row[0] if row else None)
+
+
+def review_result(api,db,chat,uid,ident,changed):
+    count,_=pending_summary(db,uid)
+    text=(f'✅ Расход №{ident} проверен.' if changed else f'✅ Расход №{ident} уже проверен.')
+    options=[]
+    if count:
+        text+=f'\nВ текущей очереди осталось: {count}.'
+        options.append(('Следующий расход','rc:next'))
+    else: text+='\nВ этой очереди больше нет расходов на проверке.'
+    options.extend([('Открыть проверенный расход',f'rc:view:{ident}'),('Очередь проверки','rc:list:pending:0'),('Главное меню','menu')])
+    api.send(chat,text,options)
 
 def message(api,db,chat,uid,text,owner):
     if text.startswith('/start receipt_'):
