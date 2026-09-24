@@ -16,7 +16,8 @@ def home_options(role):
         options = [('Расход', 'new:expense'), ('Приход', 'new:income'),
                    ('Выдать деньги', 'fund:menu'), ('Финансы', 'ui:finance'),
                    ('Отчёты', 'ui:reports'), ('Команда', 'ui:team'),
-                   ('Контроль стройки', 'ctl:home'), ('Фотоотчёты стройки', 'site:home')]
+                   ('Контроль стройки', 'ctl:home'), ('Фотоотчёты стройки', 'site:home'),
+                   ('Проверка расходов', 'rc:list')]
     return options + [('Как пользоваться', 'ui:help')]
 
 

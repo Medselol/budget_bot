@@ -30,7 +30,7 @@ def card(api,db,chat,uid,owner,ident):
     if not allowed(db,uid,owner,row): api.send(chat,'Операция недоступна.');return
     status,reason,count=metadata(db,ident)
     api.send(chat,ledger.operation_text(db,row)+f'\nПроверка: {STATUS.get(status,status)}\nЧеков: {count}'+ ('\nБез чека: '+reason if reason else ''),
-        [('Посмотреть чеки',f'rc:files:{ident}')]+([('Добавить чеки',f'rc:add:{ident}'),('Нет чека — пояснить',f'rc:reason:{ident}')] if allowed(db,uid,owner,row,True) else [])+([('Проверено',f'rc:approve:{ident}'),('Вернуть на проверку',f'rc:pending:{ident}')] if ledger.manager(db,uid,owner) else [])+[('Меню','menu')])
+        [('Посмотреть чеки',f'rc:files:{ident}')]+([('Добавить чеки',f'rc:add:{ident}'),('Нет чека — пояснить',f'rc:reason:{ident}')] if allowed(db,uid,owner,row,True) else [])+([('Проверено',f'rc:approve:{ident}'),('Вернуть на проверку',f'rc:pending:{ident}')] if ledger.manager(db,uid,owner) else [])+([('К проверке расходов','rc:list')] if ledger.manager(db,uid,owner) else [])+[('Меню','menu')])
 
 def begin(api,db,chat,uid,ident):
     ledger.set_draft(db,uid,{'step':'receipt_upload','operation_id':ident})
@@ -39,7 +39,8 @@ def begin(api,db,chat,uid,ident):
 def review_list(api,db,chat,uid,owner,value):
     if not ledger.manager(db,uid,owner): return
     if value=='rc:list':
-        api.send(chat,'Проверка расходов:',[(label,'rc:list:'+s+':0') for s,label in STATUS.items()]+[('Меню','menu')]);return
+        count=db.execute("SELECT COUNT(*) FROM operations o LEFT JOIN expense_reviews v ON v.operation_id=o.id WHERE o.kind='expense' AND COALESCE(v.status,'pending')='pending'").fetchone()[0]
+        api.send(chat,f'Проверка расходов · ожидают: {count}\nРасходы уже учтены в балансе. Проверяй детали и чеки, затем отмечай «Проверено».',[(label,'rc:list:'+s+':0') for s,label in STATUS.items()]+[('Настройки уведомлений','ec:settings'),('Главное меню','menu')]);return
     parts=value.split(':');status=parts[2]
     if status not in STATUS: return
     try: page=max(0,int(parts[3]))

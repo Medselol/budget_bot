@@ -137,10 +137,11 @@ class Runtime:
     def _notifications(self):
         from request_notifications import deliver
         from site_notifications import deliver as deliver_site
+        from expense_notifications import deliver as deliver_expense
         db=connection(self.path)
         try:
             while not self.stop.is_set():
-                for delivery in (deliver,deliver_site):
+                for delivery in (deliver,deliver_site,deliver_expense):
                     try: delivery(self.api,db,self.owner)
                     except Exception as exc:
                         db.rollback()

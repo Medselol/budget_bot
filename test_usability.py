@@ -16,7 +16,8 @@ class UsabilityTests(unittest.TestCase):
     def test_compact_home_and_reachable_sections(self):
         for uid in (123,456,789,987):
             self.cb('menu',uid)
-            self.assertLessEqual(len(self.routes()),9)
+            self.assertLessEqual(len(self.routes()),10 if uid in (123,987) else 9)
+            self.assertEqual('rc:list' in self.routes(),uid in (123,987))
             self.assertEqual(len(self.routes()),len(set(self.routes())))
             self.assertIn('ui:help',self.routes())
             self.assertIn('site:home',self.routes())

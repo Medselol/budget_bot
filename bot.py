@@ -126,6 +126,8 @@ def connect(path, owner_id=0, initial_users=()):
     init_exchange(db)
     from receipts import init as init_receipts
     init_receipts(db)
+    from expense_notifications import init as init_expense_alerts
+    init_expense_alerts(db)
     from control_data import init as init_controls
     init_controls(db)
     from site_reports import init as init_site_reports
@@ -181,6 +183,8 @@ def record(db, data, update_id, user_id=0):
         if row is None:
             raise ValueError("Операция не сохранена. Проверь сумму и счета.")
         if cursor.rowcount:
+            from expense_notifications import changed
+            changed(db,row[0])
             bump_revision(db)
     return row[0]
 
@@ -209,6 +213,8 @@ def update_operation(db, data, operation_id, user_id):
              data["amount_kop"], data.get("currency", "UAH"), data.get("comment", ""), operation_id, user_id))
         if not cursor.rowcount:
             raise ValueError("Операция не найдена или принадлежит другому пользователю")
+        from expense_notifications import changed
+        changed(db,operation_id)
         bump_revision(db)
 
 
@@ -781,6 +787,8 @@ def _dispatch_callback(bot, db, chat, uid, update_id, value, owner_id=0):
     if site_callback(bot, db, chat, uid, update_id, value, owner_id): return
     from controls import callback as control_callback
     if control_callback(bot, db, chat, uid, update_id, value, owner_id): return
+    from expense_notifications import callback as expense_callback
+    if expense_callback(bot, db, chat, uid, value, owner_id): return
     from receipts import callback as receipt_callback
     if receipt_callback(bot, db, chat, uid, value, owner_id): return
     from exchange import callback as exchange_callback
@@ -802,6 +810,8 @@ def _dispatch_message(bot, db, chat, uid, text, owner_id=0):
     if site_message(bot, db, chat, uid, text, owner_id): return
     from controls import message as control_message
     if control_message(bot, db, chat, uid, text, owner_id): return
+    from expense_notifications import message as expense_message
+    if expense_message(bot, db, chat, uid, text, owner_id): return
     from receipts import message as receipt_message
     if receipt_message(bot, db, chat, uid, text, owner_id): return
     from exchange import message as exchange_message
