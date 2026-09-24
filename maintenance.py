@@ -1,5 +1,7 @@
 """Daily verified SQLite snapshots and opt-in weekly notifications."""
 import logging
+import threading
+from functools import wraps
 import os
 import sqlite3
 import time
@@ -8,6 +10,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import bot as ledger
 import control_data as data
+
+BACKUP_LOCK = threading.RLock()
+
+
+def backup_locked(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with BACKUP_LOCK: return fn(*args, **kwargs)
+    return wrapped
+
 
 MAX_DOWNLOAD = 45*1024*1024
 
@@ -18,6 +30,7 @@ def backup_dir(db):
     return Path(filename).resolve().parent / 'backups'
 
 
+@backup_locked
 def create_backup(db, now=None):
     if db.in_transaction: raise ValueError('Дождись завершения операции и повтори.')
     now=now or datetime.now(ledger.TZ)
@@ -52,6 +65,15 @@ def create_backup(db, now=None):
 def latest_backup(db):
     files=sorted(backup_dir(db).glob('ledger-*.zip'),reverse=True)
     return files[0] if files else None
+
+
+@backup_locked
+def backup_download(db):
+    path=latest_backup(db)
+    if not path: path=create_backup(db)
+    if path.stat().st_size>MAX_DOWNLOAD:
+        raise ValueError('Копия больше 45 МБ. Скачай её из постоянного диска сервиса; отправка через бота недоступна.')
+    return path.name,path.read_bytes()
 
 
 def subscribe(db,uid,owner,enabled):

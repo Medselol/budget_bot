@@ -321,6 +321,8 @@ def _callback(api,db,chat,uid,update_id,value,owner):
     elif p[1]=='budget' and len(p)==4: budget_card(api,db,chat,uid,owner,p[2],max(0,int(p[3])))
     elif value=='ctl:budgetpdf':
         data.require_reader(db,uid,owner)
+        from background import defer
+        if defer(api,db,chat,'budget_pdf',lambda worker,conn: callback(worker,conn,chat,uid,update_id,value,owner)): return
         from control_pdf import budget_pdf
         api.document(chat,'budget_plan_fact.pdf',budget_pdf(db));budget_card(api,db,chat,uid,owner,'UAH',0)
     elif p[1]=='audit':
@@ -347,12 +349,13 @@ def _callback(api,db,chat,uid,update_id,value,owner):
         else: api.send(chat,data.weekly_text(db),[('Настроить сводку','ctl:weekly')])
     elif p[1]=='backup':
         if uid!=owner: raise ValueError('Полная копия базы доступна только владельцу.')
+        from background import defer
+        if len(p)==3 and p[2] in ('create','download'):
+            if defer(api,db,chat,'backup_file',lambda worker,conn: callback(worker,conn,chat,uid,update_id,value,owner)): return
         if len(p)==3 and p[2]=='create': maintenance.create_backup(db)
         if len(p)==3 and p[2]=='download':
-            path=maintenance.latest_backup(db)
-            if not path: path=maintenance.create_backup(db)
-            if path.stat().st_size>maintenance.MAX_DOWNLOAD: raise ValueError('Копия больше 45 МБ. Скачай её из постоянного диска сервиса; отправка через бота недоступна.')
-            api.document(chat,path.name,path.read_bytes())
+            name,content=maintenance.backup_download(db)
+            api.document(chat,name,content)
         last=db.execute("SELECT value FROM settings WHERE key='backup_last'").fetchone()
         error=db.execute("SELECT value FROM settings WHERE key='backup_error'").fetchone()
         api.send(chat,'Резервные копии\nАвтоматически каждый день при работающем боте. Хранятся копии за последние 7 дней с успешным сохранением.\nПоследняя: '+(last[0] if last else 'ещё не создана')+('\n'+error[0] if error else '')+'\nКопия включает операции, пользователей и документы. Хранится на том же диске сервиса: скачивай её отдельно для защиты от потери диска.',[('Создать сейчас','ctl:backup:create'),('Скачать последнюю','ctl:backup:download')])

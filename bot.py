@@ -320,6 +320,11 @@ class Telegram:
         self.url = f"https://api.telegram.org/bot{token}/"
 
     def call(self, method, payload):
+        from background import measure
+        with measure('telegram_' + method):
+            return self._call(method, payload)
+
+    def _call(self, method, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self.url + method, data=body, headers={"Content-Type": "application/json; charset=utf-8"})
         with urllib.request.urlopen(request, timeout=50) as response:
@@ -335,6 +340,11 @@ class Telegram:
         self.call("sendMessage", payload)
 
     def document(self, chat, name, content):
+        from background import measure
+        with measure('telegram_document'):
+            return self._document(chat, name, content)
+
+    def _document(self, chat, name, content):
         mime = {".pdf":"application/pdf", ".jpg":"image/jpeg", ".png":"image/png", ".zip":"application/zip"}.get(Path(name).suffix.lower(), "text/csv")
         boundary = "----buildledger" + str(int(time.time() * 1000))
         data = (
@@ -469,6 +479,10 @@ def report_text(db, start, end, pid, user_id=None):
 
 
 def show_report(bot, db, chat, start, end, pid, user_id=None, viewer_id=None):
+    from background import defer
+    if defer(bot, db, chat, 'report_pdf',
+             lambda api, worker_db: show_report(api, worker_db, chat, start, end, pid, user_id, viewer_id)):
+        return
     txt, rows, name = report_text(db, start, end, pid, user_id)
     csv_button = f"csvall:{start or '0'}:{end or '0'}" if user_id is None else f"csv:{start or '0'}:{end or '0'}:{pid or 0}"
     if viewer_id is not None and user_id is not None:
@@ -801,18 +815,26 @@ def handle_media(bot, db, chat, uid, payload, update_id, owner_id=0):
 
 
 def run(bot, db, owner_id, sync=None):
-    from maintenance import Scheduler
-    scheduler = Scheduler()
+    from background import Runtime
+    filename = db.execute('PRAGMA database_list').fetchone()[2]
+    if not filename:
+        raise ValueError('Background runtime requires a database file.')
+    runtime = Runtime(bot, filename, owner_id, sync)
+    bot.background = runtime
+    runtime.start()
+    try:
+        _poll(bot, db, owner_id)
+    finally:
+        runtime.close()
+        del bot.background
+
+
+def _poll(bot, db, owner_id):
+    from background import measure
     saved = db.execute("SELECT value FROM settings WHERE key='offset'").fetchone()
     offset = int(saved[0]) if saved else 0
-    if sync:
-        sync(db)
     while True:
         try:
-            try:
-                scheduler.tick(bot, db, owner_id)
-            except Exception:
-                logging.exception("Background maintenance failed")
             updates = bot.call("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]})
             for update in updates:
                 uid = (update.get("message") or update.get("callback_query") or {}).get("from", {}).get("id")
@@ -825,24 +847,24 @@ def run(bot, db, owner_id, sync=None):
                 if active and chat == uid:  # private chat only
                     try:
                         if "callback_query" in update:
-                            bot.call("answerCallbackQuery", {"callback_query_id": payload["id"]})
-                            handle_callback(bot, db, chat, uid, update["update_id"], payload.get("data", ""), owner_id)
+                            try:
+                                bot.call("answerCallbackQuery", {"callback_query_id": payload["id"]})
+                            except Exception as exc:
+                                logging.warning("Callback acknowledgement failed error=%s", type(exc).__name__)
+                            with measure('callback_handler'):
+                                handle_callback(bot, db, chat, uid, update["update_id"], payload.get("data", ""), owner_id)
                         elif "photo" in payload or "document" in payload:
                             handle_media(bot, db, chat, uid, payload, update["update_id"], owner_id)
                         elif "text" in payload:
                             handle_message(bot, db, chat, uid, payload["text"].strip(), owner_id)
-                        if sync:
-                            sync(db)
                     except Exception:
                         logging.exception("Update %s failed", update["update_id"])
-                        continue  # retry this update rather than silently lose a financial record
+                        break  # Keep offset here: later updates must not skip the failed record.
                 elif chat == uid and "text" in payload and payload["text"].strip().startswith("/start"):
                     bot.send(chat, f"Доступ закрыт. Твой Telegram ID: {uid}. Передай владельцу свой @ник (или этот ID, если ника нет). Он добавит тебя через «Пользователи».")
                 offset = update["update_id"] + 1
                 with db:
                     db.execute("INSERT INTO settings(key,value) VALUES ('offset',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),))
-            if sync:
-                sync(db)
         except (urllib.error.URLError, TimeoutError, RuntimeError):
             logging.exception("Telegram connection error")
             time.sleep(5)
