@@ -917,7 +917,13 @@ def main():
     if os.environ.get("GOOGLE_SHEET_ID"):
         from sheets_sync import build_sync
         sync = build_sync(os.environ["GOOGLE_SHEET_ID"], os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
-    run(Telegram(token), db, owner_id, sync)
+    from vita_export_server import start_optional_export
+    export = start_optional_export(path, os.environ)
+    try:
+        run(Telegram(token), db, owner_id, sync)
+    finally:
+        if export is not None:
+            export.stop()
 
 
 if __name__ == "__main__":
