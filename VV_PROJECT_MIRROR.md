@@ -76,3 +76,75 @@ Run `python -m unittest discover -v` and
 databases and loopback HTTP only. It covers creates, retries/restarts, per-payer
 mapping, original UAH, correction/cancellation chains, rollback, concurrent
 cursors, malformed input, authentication, deadlines, reports and no export echo.
+
+## Independent construction treasury (additive v2)
+
+The new `vv-project-snapshot-v2` stream uses the fixed, fingerprint-covered
+`origin_namespace: "construction_cash"`. It has independent integer operation IDs,
+correction roots, reversal IDs, cursor, explicit cutoff, durable state and audit.
+It accepts only new Vita expenses from VV's independent construction treasury;
+Shevchenkovo expenses and construction income do not appear in this stream.
+V1 personal-ledger snapshots, identity, cutoff, records, tables and acknowledgement
+format are unchanged. Do not renumber or copy personal operations into v2.
+
+V2 uses the same configured `POST /v1/vv-expenses` URL, dedicated existing write
+token, source instance/generation and exact Denis/Igor project mapping. No new
+credential, listener, project or permission is introduced. Protocol version 2
+must **not** be confused with a new source generation. Enable this requested
+source explicitly on both applications:
+
+- `VITA_VV_CONSTRUCTION_ENABLED=1`
+- `VITA_VV_CONSTRUCTION_AFTER_ID=0` for a newly created, empty treasury. This is an
+  independent construction-operation watermark, never the personal v1 cutoff.
+  Review another cutoff explicitly if a treasury already contains records.
+
+Without the opt-in, v2 HTTP requests return `construction_stream_disabled`, while
+v1 continues normally. The v2 acknowledgement is `vv-project-ack-v2` with
+`origin_namespace`, cursor, fingerprint and active count. The namespace must
+match exactly; no fallback to v1 is allowed. Existing transport authentication,
+size/time bounds, no-redirect handling and scope validation remain in force.
+
+Storage is additive: `vv_construction_project_expenses`,
+`vv_construction_mirror_state`, and `vv_construction_mirror_audit`, with equivalent
+append-only/tombstone protections. BEFORE INSERT identity-collision guards also
+block SQL REPLACE from overwriting records or audit rows, including hidden-rowid
+aliases, even when SQLite recursive triggers are disabled. These additive guards
+protect both mirror namespaces and do not rewrite stored history. Table names are fixed by local scope type,
+never wire input. Overlapping operation IDs between v1 and v2 are valid.
+Construction report IDs are `VV:construction_cash:<operation_id>`; existing v1
+IDs remain `VV:<operation_id>`. Reports include each active version once, label
+its construction-treasury provenance and remain cash-neutral. Native operations,
+accounts, personal reports and the Vita-to-VV export never receive these rows.
+
+Construction sources are `vlad`, `valera`, `common`, and `unknown`. `unknown` is
+stored and reported unchanged; it must never be guessed or converted to Common.
+V1 still rejects `unknown`. A source correction appends a reversal and replacement
+under the original root. Original UAH input amounts remain UAH; the receiver
+never recalculates exchange rates or makes a second cash debit. Receipts and
+actor identifiers are not sent by either mirror stream.
+
+### Reviewed rollout order
+
+1. Back up both databases through their supported consistent backup procedures.
+2. Publish/deploy the receiver update first, preserving all existing scope values
+   and credentials. Confirm old v1 snapshots continue to be accepted.
+3. Enable v2 on the receiver with the explicitly reviewed construction cutoff.
+4. Publish/deploy VV's treasury and sender update, then enable v2 with the same
+   cutoff. Do not change personal `VITA_VV_AFTER_ID` or source generation.
+5. Check both stream acknowledgements and compare active project mirror counts;
+   use synthetic tests, not a real test financial transaction. On any lineage
+   mismatch, investigate rather than resetting state or replaying into v1.
+
+Disabling v2 only pauses new delivery. Existing v2 report rows remain auditable,
+and the immutable treasury retains the outbox for later exact retry. It does not
+reset cursors, delete rows or move history back into personal cash.
+
+### Added verification
+
+`python -m unittest test_vv_construction_mirror -v` covers overlapping v1/v2 IDs,
+independent watermarks, unknown source, source corrections, voids, retries and
+restart, immutable history, rollback, protocol/scope rejection, opt-in HTTP
+routing, project-only reports and no native-cash/export echo. Run both existing
+full discovery suites as well. A separate cross-repository loopback integration
+check exercises the actual VV sender against this receiver with disposable
+SQLite databases; it creates no real operations or network configuration.

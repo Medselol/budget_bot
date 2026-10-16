@@ -23,6 +23,8 @@ MAX_BYTES = 16 * 1024 * 1024
 REQUEST_SECONDS = 10
 MAX_INTEGER = 2**63 - 1
 VERSION = 'vv-project-snapshot-v1'
+CONSTRUCTION_VERSION = 'vv-project-snapshot-v2'
+CONSTRUCTION_NAMESPACE = 'construction_cash'
 PROVENANCE = 'VV · исправления только в VV'
 TOP_FIELDS = {'version', 'source_instance', 'generation', 'project_mapping', 'after_id',
               'cursor', 'records', 'fingerprint', 'captured_at'}
@@ -88,9 +90,23 @@ class Scope:
         return (self.source_instance, self.generation, canonical(self.project_mapping), self.after_id)
 
 
+@dataclass(frozen=True)
+class ConstructionScope(Scope):
+    """Independent watermark for the fixed construction-cash origin namespace."""
+
+
+def _stream(scope):
+    # Table names are fixed constants, never supplied by the caller or wire data.
+    if type(scope) is ConstructionScope:
+        return 'vv_construction_', CONSTRUCTION_VERSION, 'vv-project-ack-v2'
+    if type(scope) is Scope:
+        return 'vv_', VERSION, 'vv-project-ack-v1'
+    raise ValueError('Invalid mirror scope type')
+
+
 def init(db):
     """Add only isolated mirror tables; safe when the optional receiver is off."""
-    db.executescript('''
+    schema = '''
     CREATE TABLE IF NOT EXISTS vv_mirror_state(
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
         source_instance TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -112,6 +128,15 @@ def init(db):
         source_instance TEXT NOT NULL, generation INTEGER NOT NULL, project_id INTEGER,
         project_mapping_json TEXT NOT NULL, cursor INTEGER NOT NULL, fingerprint TEXT NOT NULL, action TEXT NOT NULL,
         operation_id INTEGER, reversal_operation_id INTEGER, active_count INTEGER);
+    -- REPLACE can delete conflicting rows without DELETE triggers when
+    -- recursive_triggers is off. Reject identity collisions before insertion.
+    -- INTEGER PRIMARY KEY aliases rowid, _rowid_ and oid, including the audit ID.
+    CREATE TRIGGER IF NOT EXISTS vv_mirror_audit_no_replace BEFORE INSERT ON vv_mirror_audit
+        WHEN EXISTS(SELECT 1 FROM vv_mirror_audit WHERE id=NEW.id)
+        BEGIN SELECT RAISE(ABORT,'VV audit identity is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS vv_expense_no_replace BEFORE INSERT ON vv_project_expenses
+        WHEN EXISTS(SELECT 1 FROM vv_project_expenses WHERE operation_id=NEW.operation_id)
+        BEGIN SELECT RAISE(ABORT,'VV record identity is immutable'); END;
     CREATE TRIGGER IF NOT EXISTS vv_mirror_audit_no_update BEFORE UPDATE ON vv_mirror_audit
         BEGIN SELECT RAISE(ABORT,'VV audit is immutable'); END;
     CREATE TRIGGER IF NOT EXISTS vv_mirror_audit_no_delete BEFORE DELETE ON vv_mirror_audit
@@ -125,7 +150,9 @@ def init(db):
           OR OLD.first_cursor IS NOT NEW.first_cursor OR NEW.last_cursor<OLD.last_cursor
           OR (OLD.deleted=1 AND (NEW.deleted!=1 OR OLD.reversal_operation_id IS NOT NEW.reversal_operation_id))
         BEGIN SELECT RAISE(ABORT,'VV records are immutable'); END;
-    ''')
+    '''
+    db.executescript(schema)
+    db.executescript(schema.replace('vv_', 'vv_construction_'))
 
 
 def decode(data):
@@ -146,10 +173,15 @@ def decode(data):
 
 
 def validate(payload, scope):
-    if not isinstance(payload, dict) or set(payload) != TOP_FIELDS:
+    prefix, version, _ = _stream(scope)
+    construction = prefix == 'vv_construction_'
+    fields = TOP_FIELDS | {'origin_namespace'} if construction else TOP_FIELDS
+    if not isinstance(payload, dict) or set(payload) != fields:
         raise SnapshotError('invalid_snapshot', 400)
-    if payload['version'] != VERSION:
+    if payload['version'] != version:
         raise SnapshotError('unsupported_version', 400)
+    if construction and payload['origin_namespace'] != CONSTRUCTION_NAMESPACE:
+        raise SnapshotError('scope_conflict')
     if any(type(payload[key]) is not type(getattr(scope, key)) or payload[key] != getattr(scope, key)
            for key in ('source_instance', 'generation', 'project_mapping', 'after_id')):
         raise SnapshotError('scope_conflict')
@@ -188,7 +220,8 @@ def validate(payload, scope):
                 row['deleted'] != (reversal is not None) or
                 not integer(row['amount_minor'], 1, 1_000_000_000_000) or
                 row['currency'] not in ('UAH', 'USD') or row['payer'] not in ('denis', 'igor') or
-                row['cashbox'] not in ('vlad', 'valera', 'common')):
+                row['cashbox'] not in (('vlad', 'valera', 'common', 'unknown') if construction
+                                      else ('vlad', 'valera', 'common'))):
             raise SnapshotError('invalid_record', 400)
         for key, limit in (('category', 100), ('cost_type', 30), ('comment', 2000)):
             if not isinstance(row[key], str) or len(row[key]) > limit or '\x00' in row[key]:
@@ -223,6 +256,7 @@ def validate(payload, scope):
 def apply_snapshot(db, payload, scope, *, deadline=None):
     """Full append-only snapshot reconciliation in one bounded transaction."""
     deadline = deadline if deadline is not None else time.monotonic() + REQUEST_SECONDS
+    prefix, _, ack_version = _stream(scope)
     incoming, captured = validate(payload, scope)
     if time.monotonic() >= deadline:
         raise SnapshotError('deadline', 503)
@@ -235,8 +269,8 @@ def apply_snapshot(db, payload, scope, *, deadline=None):
             found={r[0] for r in db.execute('SELECT id FROM projects WHERE id IN (?,?)', tuple(scope.project_mapping.values()))}
             if found != set(scope.project_mapping.values()):
                 raise SnapshotError('project_unavailable')
-            state = db.execute('SELECT * FROM vv_mirror_state WHERE singleton=1').fetchone()
-            existing = {r['operation_id']: r for r in db.execute('SELECT * FROM vv_project_expenses')}
+            state = db.execute(f'SELECT * FROM {prefix}mirror_state WHERE singleton=1').fetchone()
+            existing = {r['operation_id']: r for r in db.execute(f'SELECT * FROM {prefix}project_expenses')}
             if state:
                 if tuple(state[k] for k in ('source_instance', 'generation', 'project_mapping_json', 'after_id')) != scope.values():
                     raise SnapshotError('lineage_conflict')
@@ -268,29 +302,31 @@ def apply_snapshot(db, payload, scope, *, deadline=None):
                         raise SnapshotError('historical_record_conflict')
                     changes.append(('insert', op, row, immutable))
             count = sum(not row['deleted'] for row in incoming.values())
-            ack = dict(version='vv-project-ack-v1', cursor=payload['cursor'],
+            ack = dict(version=ack_version, cursor=payload['cursor'],
                        fingerprint=payload['fingerprint'], count=count)
+            if type(scope) is ConstructionScope:
+                ack['origin_namespace'] = CONSTRUCTION_NAMESPACE
             if state and payload['cursor'] == state['cursor']:
                 # Never turn a retry into another mutation or audit record.
                 return ack
             for action, op, row, immutable in changes:
                 if action == 'insert':
-                    db.execute('''INSERT INTO vv_project_expenses(operation_id,root_operation_id,source_instance,
+                    db.execute(f'''INSERT INTO {prefix}project_expenses(operation_id,root_operation_id,source_instance,
                         generation,project_id,payload_json,deleted,reversal_operation_id,first_cursor,last_cursor)
                         VALUES (?,?,?,?,?,?,?,?,?,?)''',
                         (op, row['root_operation_id'], scope.source_instance, scope.generation, scope.project_mapping[row['payer']],
                          immutable, int(row['deleted']), row['reversal_operation_id'], payload['cursor'], payload['cursor']))
                 else:
-                    db.execute('UPDATE vv_project_expenses SET deleted=1,reversal_operation_id=?,last_cursor=? WHERE operation_id=?',
+                    db.execute(f'UPDATE {prefix}project_expenses SET deleted=1,reversal_operation_id=?,last_cursor=? WHERE operation_id=?',
                                (row['reversal_operation_id'], payload['cursor'], op))
-                db.execute('''INSERT INTO vv_mirror_audit(source_instance,generation,project_mapping_json,project_id,cursor,fingerprint,
+                db.execute(f'''INSERT INTO {prefix}mirror_audit(source_instance,generation,project_mapping_json,project_id,cursor,fingerprint,
                     action,operation_id,reversal_operation_id) VALUES (?,?,?,?,?,?,?,?,?)''',
                     (*scope.values()[:3], scope.project_mapping[row['payer']], payload['cursor'], payload['fingerprint'], action, op, row['reversal_operation_id']))
-            db.execute('''INSERT INTO vv_mirror_state(singleton,source_instance,generation,project_mapping_json,after_id,cursor,fingerprint,captured_at)
+            db.execute(f'''INSERT INTO {prefix}mirror_state(singleton,source_instance,generation,project_mapping_json,after_id,cursor,fingerprint,captured_at)
                 VALUES (1,?,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET cursor=excluded.cursor,
                 fingerprint=excluded.fingerprint,captured_at=excluded.captured_at,updated_at=CURRENT_TIMESTAMP''',
                 (*scope.values(), payload['cursor'], payload['fingerprint'], payload['captured_at']))
-            db.execute('''INSERT INTO vv_mirror_audit(source_instance,generation,project_mapping_json,cursor,fingerprint,action,active_count)
+            db.execute(f'''INSERT INTO {prefix}mirror_audit(source_instance,generation,project_mapping_json,cursor,fingerprint,action,active_count)
                 VALUES (?,?,?,?,?,'snapshot',?)''', (*scope.values()[:3], payload['cursor'], payload['fingerprint'], count))
             if changes:
                 db.execute("INSERT INTO settings(key,value) VALUES ('ledger_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
@@ -303,19 +339,20 @@ def apply_snapshot(db, payload, scope, *, deadline=None):
         db.set_progress_handler(None, 0)
 
 
-def report_rows(db, start=None, end=None, project_id=None):
+def _report_stream_rows(db, start, end, project_id, *, construction=False):
     """Read-only presentation rows with non-native identifiers and no account."""
-    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vv_project_expenses'").fetchone():
+    table = 'vv_construction_project_expenses' if construction else 'vv_project_expenses'
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
         return []
     rows = []
-    for stored in db.execute('''SELECT m.*,p.name AS project FROM vv_project_expenses m
+    for stored in db.execute(f'''SELECT m.*,p.name AS project FROM {table} m
                                JOIN projects p ON p.id=m.project_id WHERE m.deleted=0'''):
         if project_id is not None and stored['project_id'] != project_id:
             continue
         row = json.loads(stored['payload_json'])
         if (start and row['day'] < start) or (end and row['day'] > end):
             continue
-        rows.append(dict(id=f"VV:{row['operation_id']}", update_id=None, user_id=None,
+        rows.append(dict(id=f"VV:{CONSTRUCTION_NAMESPACE}:{row['operation_id']}" if construction else f"VV:{row['operation_id']}", update_id=None, user_id=None,
                          occurred_on=row['day'], kind='expense', project_id=stored['project_id'],
                          project=stored['project'], category=row['category'],
                          cost_type={'materials':'Материалы', 'labor':'Работа', 'mixed':'Материалы и работа', 'other':'Прочее'}.get(row['cost_type'], row['cost_type']),
@@ -324,21 +361,35 @@ def report_rows(db, start=None, end=None, project_id=None):
                          currency=row['currency'], comment=row['comment'], created_at=row['created_at'],
                          target_amount_kop=None, target_currency=None, exchange_rate=None,
                          user_name='VV · ' + ('Денис' if row['payer'] == 'denis' else 'Игорь'),
-                         provenance=PROVENANCE, origin='vv', origin_instance=stored['source_instance'],
+                         provenance=('VV · строительная касса · исправления только в VV' if construction else PROVENANCE), origin='vv', origin_instance=stored['source_instance'],
                          origin_generation=stored['generation'], origin_operation_id=row['operation_id'],
                          root_operation_id=row['root_operation_id'], cashbox=row['cashbox'], project_only=True))
+    if construction:
+        for row in rows:
+            row['origin_namespace'] = CONSTRUCTION_NAMESPACE
     return rows
+
+
+def report_rows(db, start=None, end=None, project_id=None):
+    """Combine isolated namespaces only in cash-neutral project presentation."""
+    return (_report_stream_rows(db, start, end, project_id) +
+            _report_stream_rows(db, start, end, project_id, construction=True))
 
 
 class VVReceiverServer:
     """Independent opt-in write listener. The export token can never authorize it."""
-    def __init__(self, path, *, token, scope, export_token='', host='::', port=8788):
+    def __init__(self, path, *, token, scope, export_token='', host='::', port=8788,
+                 construction_after_id=None):
         if (not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{32,256}', token) or
                 (export_token and hmac.compare_digest(token, export_token))):
             raise ValueError('Invalid independent write authentication')
-        if not isinstance(scope, Scope) or type(port) is not int or not 0 <= port <= 65535:
+        if type(scope) is not Scope or type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('Invalid receiver configuration')
         self.path, self.scope, self.host, self.port = path, scope, host, port
+        self.construction_scope = None
+        if construction_after_id is not None:
+            self.construction_scope = ConstructionScope(scope.source_instance, scope.generation,
+                                                        scope.project_mapping, construction_after_id)
         self._token = token.encode('ascii')
         self.server = self.thread = None
 
@@ -402,7 +453,12 @@ class VVReceiverServer:
                         raise SnapshotError('incomplete_body', 400)
                     payload = decode(data)
                     with closing(owner._connect()) as db:
-                        ack = apply_snapshot(db, payload, owner.scope, deadline=self.expires)
+                        scope = owner.scope
+                        if isinstance(payload, dict) and payload.get('version') == CONSTRUCTION_VERSION:
+                            if owner.construction_scope is None:
+                                raise SnapshotError('construction_stream_disabled', 403)
+                            scope = owner.construction_scope
+                        ack = apply_snapshot(db, payload, scope, deadline=self.expires)
                     return self.reply(200, canonical(ack).encode('utf-8'))
                 except SnapshotError as exc:
                     return self.reply(exc.status, canonical({'error': exc.code}).encode('ascii'))
@@ -423,9 +479,13 @@ class VVReceiverServer:
             if found != set(self.scope.project_mapping.values()):
                 raise ValueError('Missing target project')
             init(db)
-            state = db.execute('SELECT * FROM vv_mirror_state WHERE singleton=1').fetchone()
-            if state and tuple(state[k] for k in ('source_instance', 'generation', 'project_mapping_json', 'after_id')) != self.scope.values():
-                raise ValueError('Configured scope conflicts with durable lineage')
+            for scope in (self.scope, self.construction_scope):
+                if scope is None:
+                    continue
+                prefix, _, _ = _stream(scope)
+                state = db.execute(f'SELECT * FROM {prefix}mirror_state WHERE singleton=1').fetchone()
+                if state and tuple(state[k] for k in ('source_instance', 'generation', 'project_mapping_json', 'after_id')) != scope.values():
+                    raise ValueError('Configured scope conflicts with durable lineage')
         class Server(HTTPServer):
             address_family = socket.AF_INET6 if ':' in self.host else socket.AF_INET
             allow_reuse_address = True
@@ -458,7 +518,9 @@ def start_optional_receiver(path, env):
                       decode(env.get('VITA_VV_PROJECT_MAPPING', '').encode('utf-8')), configured_int('VITA_VV_AFTER_ID'))
         server = VVReceiverServer(path, token=env.get('VITA_VV_WRITE_TOKEN', ''), scope=scope,
                                   export_token=env.get('VITA_SYNC_TOKEN', ''),
-                                  port=configured_int('VITA_VV_WRITE_PORT', '8788'))
+                                  port=configured_int('VITA_VV_WRITE_PORT', '8788'),
+                                  construction_after_id=(configured_int('VITA_VV_CONSTRUCTION_AFTER_ID')
+                                      if env.get('VITA_VV_CONSTRUCTION_ENABLED', '0') == '1' else None))
         if env.get('VITA_EXPORT_ENABLED', '0') == '1' and server.port == configured_int('VITA_EXPORT_PORT', '8787'):
             raise ValueError('Receiver needs an independent port')
         server.start()
