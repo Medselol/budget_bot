@@ -68,7 +68,7 @@ class AccessTests(unittest.TestCase):
         self.cb(123,'role:set:123:investor');self.assertEqual(bot.role_for(self.db,123),'owner')
     def test_funding_full_confirmation_flow_and_foreman_cannot_delete(self):
         self.seed()
-        for v in ('fund:menu',f'fund:account:{self.a}',f'fund:account:{self.b}','fund:currency:UAH'): self.cb(123,v)
+        for v in ('fund:menu','fund:person:from:123',f'fund:box:from:123:{self.a}','fund:person:to:456',f'fund:box:to:456:{self.b}','fund:currency:UAH'): self.cb(123,v)
         self.msg(123,'200');self.assertEqual(len(bot.rows_for(self.db)),1)
         self.cb(123,'fund:save',7);self.cb(123,'fund:save',8)
         self.assertEqual(len(bot.rows_for(self.db)),2)

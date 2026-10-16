@@ -55,14 +55,25 @@ def accounts(db):
 
 def fund_prompt(api, db, chat, d):
     step = d['step']
-    if step in ('fund_from','fund_to'):
-        rows = accounts(db)
-        options = [(f"{r['user_name']} · {r['name']}", f"fund:account:{r['id']}") for r in rows if r['id'] != d.get('from_account_id')]
-        api.send(chat, 'Из чьей кассы выдать деньги?' if step=='fund_from' else 'Кому и в какую кассу передать деньги?', options+[('Отмена','cancel')])
+    if step in ('fund_from','fund_to','fund_from_account','fund_to_account'):
+        side = 'from' if step.startswith('fund_from') else 'to'
+        rows = [r for r in accounts(db) if side == 'from' or r['id'] != d.get('from_account_id')]
+        if step.endswith('_account'):
+            rows = [r for r in rows if r['owner_id'] == d.get('fund_person_id')]
+            icons = {'Наличные': '💵', 'Карта': '💳', 'Счёт': '🏦'}
+            options = [(icons.get(r['name'], '👛') + ' ' + r['name'],
+                        f"fund:box:{side}:{r['owner_id']}:{r['id']}") for r in rows]
+            label = ('Из какой кассы выдать?' if side == 'from' else 'В какую кассу передать?')
+            label += '\nУчастник: ' + (rows[0]['user_name'] if rows else 'недоступен')
+        else:
+            people = {r['owner_id']: r['user_name'] for r in rows}
+            options = [('👤 ' + name, f'fund:person:{side}:{person}') for person, name in people.items()]
+            label = 'Кто выдаёт деньги?' if side == 'from' else 'Кому передать деньги?'
+        api.send(chat, label, options+[('Отмена','cancel')])
     elif step == 'fund_currency':
-        api.send(chat, 'Валюта выдачи:', [(c,'fund:currency:'+c) for c in ledger.CURRENCIES])
+        api.send(chat, 'Валюта выдачи:', [(c,'fund:currency:'+c) for c in ledger.CURRENCIES]+[('Отмена','cancel')])
     elif step == 'fund_amount':
-        api.send(chat, 'Введи сумму выдачи. Это запись о передаче денег, не банковский перевод.')
+        api.send(chat, 'Введи сумму выдачи. Это запись о передаче денег, не банковский перевод.', [('Отмена','cancel')])
     elif step == 'fund_confirm':
         by_id = {r['id']:r for r in accounts(db)}
         a,b = by_id.get(d['from_account_id']),by_id.get(d['to_account_id'])
@@ -124,15 +135,33 @@ def callback(api, db, chat, uid, update_id, value, owner):
         d={'step':'fund_from'}
     elif not d or not d.get('step','').startswith('fund_'):
         api.send(chat,'Начни выдачу через меню.'); return True
-    elif value.startswith('fund:account:') and d['step'] in ('fund_from','fund_to'):
-        try: aid=int(value.rsplit(':',1)[1])
+    elif value.startswith('fund:account:'):
+        # Old Telegram keyboards must not choose the wrong side after deployment.
+        fund_prompt(api, db, chat, d); return True
+    elif value.startswith('fund:person:') and d['step'] in ('fund_from','fund_to'):
+        parts = value.split(':')
+        side = 'from' if d['step'] == 'fund_from' else 'to'
+        if len(parts) != 4 or parts[2] != side: return True
+        try: person = int(parts[3])
         except ValueError: return True
-        if aid not in {a['id'] for a in accounts(db)}: return True
-        if d['step']=='fund_from':
-            d['from_account_id']=aid;d['step']='fund_to'
+        rows = [a for a in accounts(db) if side == 'from' or a['id'] != d.get('from_account_id')]
+        if person not in {a['owner_id'] for a in rows}: return True
+        d['fund_person_id'] = person
+        d['step'] = 'fund_' + side + '_account'
+    elif value.startswith('fund:box:') and d['step'] in ('fund_from_account','fund_to_account'):
+        parts = value.split(':')
+        side = 'from' if d['step'] == 'fund_from_account' else 'to'
+        if len(parts) != 5 or parts[2] != side: return True
+        try: person, aid = int(parts[3]), int(parts[4])
+        except ValueError: return True
+        if person != d.get('fund_person_id'): return True
+        if aid not in {a['id'] for a in accounts(db) if a['owner_id'] == person}: return True
+        if side == 'from':
+            d['from_account_id'] = aid; d['step'] = 'fund_to'
         else:
-            if aid==d['from_account_id']: return True
-            d['to_account_id']=aid;d['step']='fund_currency'
+            if aid == d['from_account_id']: return True
+            d['to_account_id'] = aid; d['step'] = 'fund_currency'
+        d.pop('fund_person_id', None)
     elif value.startswith('fund:currency:') and d['step']=='fund_currency':
         c=value.rsplit(':',1)[1]
         if c not in ledger.CURRENCIES: return True
