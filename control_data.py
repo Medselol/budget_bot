@@ -146,6 +146,11 @@ def set_budget(db, uid, owner, stage, currency, amount, version):
 def budget_rows(db, currency):
     plans={r['stage']:r['amount_kop'] for r in db.execute('SELECT * FROM budgets WHERE currency=?',(currency,))}
     actual={r[0]:r[1] for r in db.execute("SELECT COALESCE(category,'Прочее'),SUM(amount_kop) FROM operations WHERE kind='expense' AND currency=? GROUP BY COALESCE(category,'Прочее')",(currency,))}
+    from vv_project_mirror import report_rows
+    for row in report_rows(db):
+        if row['currency'] == currency:
+            stage = row['category'] or 'Прочее'
+            actual[stage] = actual.get(stage, 0) + row['amount_kop']
     return [(stage,plans.get(stage),actual.get(stage,0)) for stage in dict.fromkeys([*ledger.STAGES,*actual])]
 
 
@@ -206,12 +211,15 @@ def week_start(day): return day-timedelta(days=day.weekday())
 def weekly_text(db, end=None):
     end=end or week_start(today())-timedelta(days=1)
     start=end-timedelta(days=6)
-    rows=ledger.rows_for(db,start.isoformat(),end.isoformat())
+    rows=ledger.report_rows_for(db,start.isoformat(),end.isoformat())
+    totals=ledger.summary(rows)
     result=[f'Недельная сводка: {start:%d.%m.%Y} - {end:%d.%m.%Y}']
     for currency in ledger.CURRENCIES:
         inc=sum(r['amount_kop'] for r in rows if r['kind']=='income' and r['currency']==currency)
         exp=sum(r['amount_kop'] for r in rows if r['kind']=='expense' and r['currency']==currency)
-        result += [f'\n{currency}',f'Приход: {ledger.money(inc,currency)}',f'Расход: {ledger.money(exp,currency)}',f'Изменение денег: {ledger.money(inc-exp,currency)}']
+        result += [f'\n{currency}',f'Приход: {ledger.money(inc,currency)}',f'Расход: {ledger.money(exp,currency)}',f'Изменение денег: {ledger.money(totals[currency]['cash_net'],currency)}']
+        if totals[currency]['mirrored_expense']:
+            result.append('В том числе VV: '+ledger.money(totals[currency]['mirrored_expense'],currency)+' · без списания кассы Vita; исправлять в VV')
         stages={}
         for r in rows:
             if r['kind']=='expense' and r['currency']==currency: stages[r['category'] or 'Прочее']=stages.get(r['category'] or 'Прочее',0)+r['amount_kop']

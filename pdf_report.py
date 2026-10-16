@@ -48,6 +48,7 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
         part = [r for r in rows if r['currency']==currency]
         income = sum(r['amount_kop'] for r in part if r['kind']=='income')
         expense = sum(r['amount_kop'] for r in part if r['kind']=='expense')
+        mirrored = sum(r['amount_kop'] for r in part if r.get('project_only'))
         story.append(p('Гривны / UAH' if currency=='UAH' else 'Доллары / USD','h'))
         cards=[]
         for label, val, color in [('↓ ПРИХОД',income,GREEN),('↑ РАСХОДЫ',expense,RED)]:
@@ -57,7 +58,9 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
         story.append(Spacer(1,6))
         fx=sum((r['target_amount_kop'] if r.get('target_currency')==currency else 0)-(r['amount_kop'] if r['currency']==currency else 0) for r in rows if r.get('target_currency'))
         story.append(p('Обмен валют: '+amount(fx,currency)))
-        story.append(p('Изменение денег: '+amount(income-expense+fx,currency)))
+        story.append(p('Изменение денег: '+amount(income-expense+mirrored+fx,currency)))
+        if mirrored:
+            story.append(p('В расходах проекта учтено VV: '+amount(mirrored,currency)+'. Касса Vita не списывается. Исправления и чеки доступны в VV.', 'small'))
         story.append(p('Приход включает вложения, займы, оплаты покупателей и возвраты. Переводы в одной валюте не входят в итог. Обмен отражён отдельно.', 'small'))
         groups=defaultdict(int)
         for r in part:
@@ -99,6 +102,8 @@ def pdf_report(rows, start, end, project, scope='Личный отчёт'):
                 if r.get('cost_type'): detail.append(escape(r['cost_type']))
                 if r.get('account'): detail.append('Счёт: '+escape(r['account']))
             if r.get('target_currency'): detail.append(escape('Курс: 1 USD = '+r['exchange_rate']+' UAH'))
+            if r.get('provenance'): detail.append(escape(r['provenance']))
+            if r.get('root_operation_id'): detail.append(escape('Корневая операция VV: '+str(r['root_operation_id'])))
             if r.get('receipt_label'): detail.append(escape(r['receipt_label']))
             if r.get('receipt_url'):
                 detail.append('<link href="'+escape(r['receipt_url'], {'"':'&quot;'})+'" color="'+BLUE+'"><u>Открыть чеки / операцию</u></link>')

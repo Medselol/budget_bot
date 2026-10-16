@@ -222,7 +222,9 @@ def enrich(api,db,rows):
     result=[]
     for row in rows:
         r=dict(row)
-        if r['kind']=='expense':
+        if r.get('project_only'):
+            r['receipt_label']='VV · чеки и исправления доступны в VV'
+        elif r['kind']=='expense':
             status,reason,count=metadata(db,r['id'])
             r['receipt_label']=f'Чеки: {count} · {STATUS[status]}' if count else 'Без чека · '+STATUS[status]
             if reason: r['receipt_label']+=' · '+reason

@@ -136,6 +136,8 @@ def connect(path, owner_id=0, initial_users=()):
     init_audit(db)
     from navigation import init as init_navigation
     init_navigation(db)
+    from vv_project_mirror import init as init_vv_project_mirror
+    init_vv_project_mirror(db)
     return db
 
 
@@ -246,8 +248,19 @@ def rows_for(db, start=None, end=None, project_id=None, user_id=None):
     return db.execute(sql + " ORDER BY o.occurred_on,o.id", args).fetchall()
 
 
+def report_rows_for(db, start=None, end=None, project_id=None, user_id=None):
+    """Project/aggregate reports include foreign expenses; personal cash does not."""
+    rows = list(rows_for(db, start, end, project_id, user_id))
+    if user_id is None:
+        from vv_project_mirror import report_rows
+        rows.extend(report_rows(db, start, end, project_id))
+        rows.sort(key=lambda r: (r['occurred_on'], 'project_only' in r.keys(),
+                                r['origin_operation_id'] if 'project_only' in r.keys() else r['id']))
+    return rows
+
+
 def summary(rows):
-    result = {code: {"financing": 0, "sales": 0, "refunds": 0, "expense": 0, "exchange_net": 0, "by_stage": {}, "by_source": {}, "by_type": {}} for code in CURRENCIES}
+    result = {code: {"financing": 0, "sales": 0, "refunds": 0, "expense": 0, "mirrored_expense": 0, "exchange_net": 0, "by_stage": {}, "by_source": {}, "by_type": {}} for code in CURRENCIES}
     for row in rows:
         currency = row["currency"]
         if currency not in result:
@@ -263,11 +276,13 @@ def summary(rows):
             part["by_source"][source] = part["by_source"].get(source, 0) + row["amount_kop"]
         elif row["kind"] == "expense":
             part["expense"] += row["amount_kop"]
+            if "project_only" in row.keys() and row["project_only"]:
+                part["mirrored_expense"] += row["amount_kop"]
             for key, field in (("by_stage", "category"), ("by_type", "cost_type")):
                 label = row[field] or "Прочее"
                 part[key][label] = part[key].get(label, 0) + row["amount_kop"]
     for part in result.values():
-        part["cash_net"] = part["financing"] + part["sales"] + part["refunds"] - part["expense"] + part["exchange_net"]
+        part["cash_net"] = part["financing"] + part["sales"] + part["refunds"] - part["expense"] + part["mirrored_expense"] + part["exchange_net"]
     return result
 
 
@@ -297,16 +312,17 @@ def csv_report(rows, start, end, project):
     writer = csv.writer(stream, delimiter=";")
     writer.writerow(["Отчёт по стройке", project, f"{start or 'начало'} — {end or 'сегодня'}"])
     for currency in CURRENCIES:
-        for label, key in (("Вложения и займы", "financing"), ("Поступления от покупателей", "sales"), ("Возвраты", "refunds"), ("Расходы", "expense"), ("Обмен валют, чистое изменение", "exchange_net"), ("Чистое изменение денег", "cash_net")):
+        for label, key in (("Вложения и займы", "financing"), ("Поступления от покупателей", "sales"), ("Возвраты", "refunds"), ("Расходы", "expense"), ("В том числе VV (проектные, без списания кассы)", "mirrored_expense"), ("Обмен валют, чистое изменение", "exchange_net"), ("Чистое изменение денег", "cash_net")):
             writer.writerow([label, f"{Decimal(totals[currency][key]) / 100:.2f}", currency])
     writer.writerow([])
-    writer.writerow(["ID", "Пользователь ID", "Пользователь", "Дата", "Операция", "Объект", "Этап", "Тип затрат", "Источник прихода", "Счёт", "Счёт отправителя", "Счёт получателя", "Сумма", "Валюта", "Комментарий", "Зачислено", "Валюта зачисления", "Курс UAH за USD"])
+    writer.writerow(["ID", "Пользователь ID", "Пользователь", "Дата", "Операция", "Объект", "Этап", "Тип затрат", "Источник прихода", "Счёт", "Счёт отправителя", "Счёт получателя", "Сумма", "Валюта", "Комментарий", "Зачислено", "Валюта зачисления", "Курс UAH за USD", "Происхождение", "Исходная операция VV", "Корневая операция VV"])
     for row in rows:
-        writer.writerow([row["id"], row["user_id"], safe_cell(row["user_name"]), row["occurred_on"], row["kind"], safe_cell(row["project"]), safe_cell(row["category"]), safe_cell(row["cost_type"]), safe_cell(row["source"]), safe_cell(row["account"]), safe_cell(row["from_account"]), safe_cell(row["to_account"]), f"{Decimal(row['amount_kop']) / 100:.2f}", row["currency"], safe_cell(row["comment"]), f"{Decimal(row['target_amount_kop']) / 100:.2f}" if row["target_currency"] else "", row["target_currency"] or "", row["exchange_rate"] or ""])
+        writer.writerow([row["id"], row["user_id"], safe_cell(row["user_name"]), row["occurred_on"], row["kind"], safe_cell(row["project"]), safe_cell(row["category"]), safe_cell(row["cost_type"]), safe_cell(row["source"]), safe_cell(row["account"]), safe_cell(row["from_account"]), safe_cell(row["to_account"]), f"{Decimal(row['amount_kop']) / 100:.2f}", row["currency"], safe_cell(row["comment"]), f"{Decimal(row['target_amount_kop']) / 100:.2f}" if row["target_currency"] else "", row["target_currency"] or "", row["exchange_rate"] or "", row["provenance"] if "provenance" in row.keys() else "Vita", row["origin_operation_id"] if "origin_operation_id" in row.keys() else "", row["root_operation_id"] if "root_operation_id" in row.keys() else ""])
     return ("\ufeff" + stream.getvalue()).encode("utf-8")
 
 
 def keyboard(options, width=2):
+    from action_labels import action_label
     # Keep navigation separate from actions; long labels get a full row.
     rows, pending = [], []
     footer = []
@@ -314,6 +330,7 @@ def keyboard(options, width=2):
         if pending:
             rows.append(pending[:]); pending.clear()
     for label, callback in options:
+        label = action_label(label, callback)
         button = {"text": label, "callback_data": callback}
         if callback in ('nav:back', 'menu'):
             footer.append(button); continue
@@ -481,13 +498,15 @@ def advance(bot, db, chat, uid, d):
 
 
 def report_text(db, start, end, pid, user_id=None):
-    rows = rows_for(db, start, end, pid, user_id)
+    rows = report_rows_for(db, start, end, pid, user_id)
     totals = summary(rows)
     name = "Все объекты" if pid is None else db.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()[0]
     lines = [f"Отчёт: {name}", f"Период: {start or 'с начала'} — {end or 'сегодня'}"]
     for currency in CURRENCIES:
         t = totals[currency]
         lines.extend(["", "Гривны (UAH):" if currency == "UAH" else "Доллары (USD):", "Приход денег:", "  Вложения и займы: " + money(t["financing"], currency), "  От покупателей: " + money(t["sales"], currency), "  Возвраты: " + money(t["refunds"], currency), "Расходы: " + money(t["expense"], currency), "Обмен валют: " + money(t["exchange_net"], currency), "Изменение денег: " + money(t["cash_net"], currency)])
+        if t["mirrored_expense"]:
+            lines.append("  В том числе VV: " + money(t["mirrored_expense"], currency) + " · проектные расходы, без списания кассы; исправлять в VV")
         if t["by_stage"]:
             lines.extend(["По этапам:"] + [f"  {k}: {money(v, currency)}" for k, v in sorted(t["by_stage"].items())])
         if t["by_source"]:
@@ -627,7 +646,7 @@ def _handle_callback(bot, db, chat, uid, update_id, value, owner_id=0):
             pid = None if aggregate else int(parts[3]) or None
             if pid and not db.execute("SELECT 1 FROM projects WHERE id=? AND owner_id=?", (pid, uid)).fetchone(): return
         except (ValueError, TypeError, IndexError): return
-        rows = rows_for(db, start, end, pid, None if aggregate else uid)
+        rows = report_rows_for(db, start, end, pid, None if aggregate else uid)
         name = "Все объекты" if not pid else db.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()[0]
         bot.document(chat, "stroika_report.csv", csv_report(rows, start, end, name)); return
     if not d:
@@ -919,11 +938,15 @@ def main():
         sync = build_sync(os.environ["GOOGLE_SHEET_ID"], os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
     from vita_export_server import start_optional_export
     export = start_optional_export(path, os.environ)
+    from vv_project_mirror import start_optional_receiver
+    receiver = start_optional_receiver(path, os.environ)
     try:
         run(Telegram(token), db, owner_id, sync)
     finally:
         if export is not None:
             export.stop()
+        if receiver is not None:
+            receiver.stop()
 
 
 if __name__ == "__main__":

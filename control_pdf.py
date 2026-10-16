@@ -22,6 +22,9 @@ def budget_pdf(db):
         if index: story.append(PageBreak())
         rows=data.budget_rows(db,currency)
         story += [Paragraph('Бюджет: план / факт',heading),p(ledger.DEFAULT_PROJECT_NAME),p(f'{currency} · С начала учёта · {data.today().isoformat()}'),Spacer(1,14)]
+        from vv_project_mirror import report_rows
+        mirrored=sum(r['amount_kop'] for r in report_rows(db) if r['currency']==currency)
+        if mirrored: story.append(p('В факте учтено VV: '+ledger.money(mirrored,currency)+' · без списания кассы Vita; исправления в VV.'))
         table=[[p(x) for x in ('Этап','План','Факт','Остаток / перерасход')]]
         for stage,plan,fact in rows:
             delta='План не задан' if plan is None else ('Перерасход '+ledger.money(fact-plan,currency) if fact>plan else 'Остаток '+ledger.money(plan-fact,currency))

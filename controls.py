@@ -198,6 +198,9 @@ def debt_list(api,db,chat,uid,owner,mode,page):
 def budget_text(db,currency,rows=None):
     rows=data.budget_rows(db,currency) if rows is None else rows
     lines=[f'Бюджет / факт · {currency} · с начала учёта']
+    from vv_project_mirror import report_rows
+    mirrored=sum(r['amount_kop'] for r in report_rows(db) if r['currency']==currency)
+    if mirrored: lines.append('В факте учтено VV: '+ledger.money(mirrored,currency)+' · без списания кассы Vita; исправлять в VV')
     for stage,plan,fact in rows:
         lines.append('\n'+stage)
         lines.append('План: '+('не задан' if plan is None else ledger.money(plan,currency)))
